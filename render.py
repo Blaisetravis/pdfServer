@@ -1,0 +1,352 @@
+"""
+ReportLab renderer: Document model -> PDF bytes.
+
+The `Pen` class wraps a ReportLab canvas and exposes TOP-DOWN drawing helpers
+(y grows downward, like the original pdfkit layout.js) so the block renderers
+read like the existing JS. All user text goes through style.safe_text() to avoid
+the black-box glyph problem.
+"""
+
+from io import BytesIO
+from typing import Optional
+
+import requests
+from PIL import Image
+from reportlab.lib.colors import HexColor
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.pdfgen import canvas
+from reportlab.platypus import Paragraph
+from xml.sax.saxutils import escape
+
+from models import Document
+from style import (
+    PAGE_W, PAGE_H, MARGIN, CONTENT_W, INNER_X, INNER_Y, INNER_W, INNER_H,
+    COLORS, FONT, F_REG, F_BOLD, CELL_PAD, SECTION_PAD, safe_text,
+)
+
+C = COLORS  # shorthand
+
+
+# --- image fetch ------------------------------------------------------------
+
+def fetch_image(src: str) -> Optional[Image.Image]:
+    if not src or not str(src).startswith("http"):
+        return None
+    try:
+        r = requests.get(src, timeout=15)
+        r.raise_for_status()
+        img = Image.open(BytesIO(r.content))
+        img.load()
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        return img
+    except Exception as e:
+        print(f"[render] image fetch failed ({src[:60]}...): {e}")
+        return None
+
+
+# --- the Pen ----------------------------------------------------------------
+
+class Pen:
+    def __init__(self, c: canvas.Canvas):
+        self.c = c
+        self.H = PAGE_H
+        self.page_num = 0
+        self._title = ""
+
+    # geometry: top-down -> reportlab (bottom-left) ---------------------------
+    def fill_rect(self, x, y_top, w, h, color):
+        self.c.setFillColor(color)
+        self.c.rect(x, self.H - (y_top + h), w, h, stroke=0, fill=1)
+
+    def stroke_rect(self, x, y_top, w, h, color, lw=0.5):
+        self.c.setStrokeColor(color)
+        self.c.setLineWidth(lw)
+        self.c.rect(x, self.H - (y_top + h), w, h, stroke=1, fill=0)
+
+    def line(self, x1, y1_top, x2, y2_top, color, lw=0.5):
+        self.c.setStrokeColor(color)
+        self.c.setLineWidth(lw)
+        self.c.line(x1, self.H - y1_top, x2, self.H - y2_top)
+
+    def string_width(self, s, size, bold=False):
+        return stringWidth(safe_text(s), F_BOLD if bold else F_REG, size)
+
+    def text(self, x, y_top, s, size, color, bold=False, align="left", width=None):
+        s = safe_text(s)
+        font = F_BOLD if bold else F_REG
+        self.c.setFont(font, size)
+        self.c.setFillColor(color)
+        tx = x
+        if align in ("center", "right") and width is not None:
+            sw = stringWidth(s, font, size)
+            tx = x + (width - sw) / 2 if align == "center" else x + width - sw
+        self.c.drawString(tx, self.H - (y_top + size), s)
+
+    def paragraph(self, x, y_top, s, width, size, color, bold=False, leading=None) -> float:
+        font = F_BOLD if bold else F_REG
+        style = ParagraphStyle(
+            "p", fontName=font, fontSize=size, textColor=color,
+            leading=leading or size * 1.3,
+        )
+        html = escape(safe_text(s)).replace("\n", "<br/>")
+        p = Paragraph(html, style)
+        w, h = p.wrapOn(self.c, width, 100000)
+        p.drawOn(self.c, x, self.H - (y_top + h))
+        return h
+
+    def image(self, img: Image.Image, x, y_top, w, h):
+        try:
+            self.c.drawImage(
+                ImageReader(img), x, self.H - (y_top + h),
+                width=w, height=h, preserveAspectRatio=True, anchor="c", mask="auto",
+            )
+        except Exception as e:
+            print(f"[render] drawImage failed: {e}")
+
+    # page chrome -------------------------------------------------------------
+    def _border(self):
+        self.stroke_rect(INNER_X, INNER_Y, INNER_W, INNER_H, C["border"], 1)
+
+    def _top_bar(self, title) -> float:
+        bar_h = 22
+        self.fill_rect(INNER_X, INNER_Y, INNER_W, bar_h, C["headerBg"])
+        self.text(INNER_X + CELL_PAD, INNER_Y + 7, "T C H P A C K",
+                  FONT["pageTitle"], C["white"], bold=True)
+        if title:
+            self.text(INNER_X + INNER_W / 2, INNER_Y + 7, title.upper(),
+                      FONT["pageTitle"], C["white"], bold=True,
+                      align="right", width=INNER_W / 2 - CELL_PAD)
+        return INNER_Y + bar_h
+
+    def _footer(self):
+        self.text(MARGIN, PAGE_H - MARGIN - 14, f"Page {self.page_num}",
+                  FONT["small"], C["lightGrey"], align="center", width=CONTENT_W)
+
+    def new_page(self, title) -> float:
+        """Close the current page (if any) and start a fresh one. Returns the
+        starting y (top-down) for content."""
+        if self.page_num > 0:
+            self._footer()
+            self.c.showPage()
+        self.page_num += 1
+        self._title = title
+        self._border()
+        y = self._top_bar(title)
+        return y + 8
+
+    def ensure_space(self, needed, y_top, title) -> float:
+        if y_top + needed > INNER_Y + INNER_H:
+            return self.new_page(title)
+        return y_top
+
+    def finalize(self):
+        if self.page_num > 0:
+            self._footer()
+            self.c.showPage()
+        self.c.save()
+
+
+# --- block renderers --------------------------------------------------------
+
+def _chunk(lst, n):
+    return [lst[i:i + n] for i in range(0, len(lst), n)]
+
+
+def render_header(pen: Pen, b, y, title):
+    cols = max(1, b.columns)
+    col_w = INNER_W / cols
+    row_h = 20
+    for row in _chunk(b.fields, cols):
+        pen.stroke_rect(INNER_X, y, INNER_W, row_h, C["border"], 0.5)
+        for c, cell in enumerate(row):
+            cx = INNER_X + c * col_w
+            if c > 0:
+                pen.line(cx, y, cx, y + row_h, C["border"], 0.5)
+            label = f"{(cell.label or '').upper()}:"
+            pen.text(cx + CELL_PAD, y + 4, label, FONT["headerBar"], C["black"], bold=True)
+            lw = pen.string_width(label + " ", FONT["headerBar"], bold=True)
+            pen.text(cx + CELL_PAD + lw + 2, y + 4, cell.value or "",
+                     FONT["headerBar"], C["darkGrey"])
+        y += row_h
+    return y + CELL_PAD
+
+
+def _render_field(pen, f, x, y, width):
+    label = f"{f.label.upper()}:"
+    pen.text(x, y, label, FONT["label"], C["black"], bold=True)
+    lw = pen.string_width(label + " ", FONT["label"], bold=True)
+    h = pen.paragraph(x + lw + 4, y, f.value or "—", width - lw - 4, FONT["body"], C["darkGrey"])
+    return y + max(h, 12) + 4
+
+
+def render_spec_section(pen: Pen, b, y, title):
+    y = pen.ensure_space(60, y, title)
+    pen.text(INNER_X + SECTION_PAD, y + 5, b.title, FONT["sectionTitle"], C["black"], bold=True)
+    content_start = y + 20
+    pen.line(INNER_X, content_start, INNER_X + INNER_W, content_start, C["border"], 0.5)
+    cx = INNER_X + SECTION_PAD
+    cw = INNER_W - 2 * SECTION_PAD
+    cy = content_start + CELL_PAD
+    if b.body:
+        cy += pen.paragraph(cx, cy, b.body, cw, FONT["body"], C["darkGrey"]) + 4
+    for f in b.fields:
+        cy = _render_field(pen, f, cx, cy, cw)
+    for bullet in b.bullets:
+        cy += pen.paragraph(cx, cy, f"•  {bullet}", cw, FONT["body"], C["darkGrey"]) + 3
+    return cy + CELL_PAD
+
+
+def _table_border(pen, x, top, width, height, col_w, col_n):
+    pen.stroke_rect(x, top, width, height, C["border"], 0.5)
+    for c in range(1, col_n):
+        pen.line(x + c * col_w, top, x + c * col_w, top + height, C["borderGrey"], 0.25)
+
+
+def render_table(pen: Pen, title, headers, rows, y, page_title):
+    x = INNER_X + SECTION_PAD
+    width = INNER_W - 2 * SECTION_PAD
+    if title:
+        y = pen.ensure_space(40, y, page_title)
+        pen.text(x, y, title, FONT["sectionTitle"], C["black"], bold=True)
+        y += 18
+        pen.line(x, y, x + width, y, C["border"], 0.5)
+        y += 10
+    col_n = max(1, len(headers))
+    col_w = width / col_n
+    header_h, row_h = 22, 20
+
+    def draw_header(yy):
+        pen.fill_rect(x, yy, width, header_h, C["headerBg"])
+        for c, h in enumerate(headers):
+            pen.text(x + c * col_w + CELL_PAD, yy + 6, str(h).upper(), FONT["small"],
+                     C["white"], bold=True, align="left" if c == 0 else "center",
+                     width=col_w - 2 * CELL_PAD)
+        return yy + header_h
+
+    y = pen.ensure_space(header_h + row_h, y, page_title)
+    top = y
+    y = draw_header(y)
+    for r, row in enumerate(rows):
+        if y + row_h > INNER_Y + INNER_H:
+            _table_border(pen, x, top, width, y - top, col_w, col_n)
+            y = pen.new_page(page_title)
+            top = y
+            y = draw_header(y)
+        if r % 2 == 0:
+            pen.fill_rect(x, y, width, row_h, C["bgLight"])
+        pen.stroke_rect(x, y, width, row_h, C["borderGrey"], 0.25)
+        for c in range(col_n):
+            val = row[c] if c < len(row) else "—"
+            pen.text(x + c * col_w + CELL_PAD, y + 6, val if val not in (None, "") else "—",
+                     FONT["small"], C["darkGrey"], align="left" if c == 0 else "center",
+                     width=col_w - 2 * CELL_PAD)
+        y += row_h
+    _table_border(pen, x, top, width, y - top, col_w, col_n)
+    return y + CELL_PAD
+
+
+def render_size_chart(pen: Pen, b, y, page_title):
+    sizes = list(b.sizes)
+    if not sizes:
+        seen = []
+        for m in b.measurements.values():
+            for s in m.keys():
+                if s not in seen:
+                    seen.append(s)
+        sizes = seen
+    headers = ["Measurement", *[s.upper() for s in sizes]]
+    rows = []
+    for name, by_size in b.measurements.items():
+        rows.append([name.replace("_", " "), *[str(by_size.get(s, "—")) for s in sizes]])
+    return render_table(pen, b.title or "Size Chart", headers, rows, y, page_title)
+
+
+def render_image_grid(pen: Pen, b, y, page_title):
+    cols = max(1, b.cols)
+    gap = 15
+    cell_w = (INNER_W - (cols + 1) * gap) / cols
+    maxh = b.max_height
+    items = [(fetch_image(it.src), it.label) for it in b.images]
+    for row in _chunk(items, cols):
+        y = pen.ensure_space(maxh + 24, y, page_title)
+        for c, (img, label) in enumerate(row):
+            ix = INNER_X + gap + c * (cell_w + gap)
+            if img is not None:
+                pen.image(img, ix, y, cell_w, maxh)
+            pen.text(ix, y + maxh + 4, (label or "IMAGE").upper(), FONT["small"],
+                     C["medGrey"], align="center", width=cell_w)
+        y += maxh + 24
+    return y
+
+
+def render_text(pen: Pen, b, y, page_title):
+    size = {"title": FONT["sectionTitle"], "heading": 10,
+            "body": FONT["body"], "small": FONT["small"]}[b.variant]
+    bold = b.variant in ("title", "heading")
+    y = pen.ensure_space(size * 2, y, page_title)
+    h = pen.paragraph(INNER_X + SECTION_PAD, y, b.text, INNER_W - 2 * SECTION_PAD,
+                      size, C["black"] if bold else C["darkGrey"], bold=bold)
+    return y + h + 6
+
+
+def render_divider(pen: Pen, b, y, page_title):
+    y = pen.ensure_space(10, y, page_title)
+    pen.line(INNER_X + SECTION_PAD, y, INNER_X + INNER_W - SECTION_PAD, y, C["borderGrey"], 0.5)
+    return y + 8
+
+
+def render_spacer(pen: Pen, b, y, page_title):
+    return y + b.height
+
+
+def render_abs(pen: Pen, b, y, page_title):
+    for el in b.elements:
+        color = HexColor(el.color) if el.color else C["darkGrey"]
+        if el.kind == "text":
+            pen.text(el.x, el.y, el.text or "", el.font_size or 9, color, bold=el.bold)
+        elif el.kind == "rect":
+            pen.stroke_rect(el.x, el.y, el.w or 0, el.h or 0, color, 1)
+        elif el.kind == "line":
+            pen.line(el.x, el.y, el.x2 if el.x2 is not None else el.x,
+                     el.y2 if el.y2 is not None else el.y, color, 1)
+        elif el.kind == "image":
+            img = fetch_image(el.src)
+            if img is not None:
+                pen.image(img, el.x, el.y, el.w or 100, el.h or 100)
+    return y
+
+
+_DISPATCH = {
+    "header": render_header,
+    "spec_section": render_spec_section,
+    "table": lambda pen, b, y, t: render_table(pen, b.title, b.headers, b.rows, y, t),
+    "size_chart": render_size_chart,
+    "image_grid": render_image_grid,
+    "text": render_text,
+    "divider": render_divider,
+    "spacer": render_spacer,
+    "abs": render_abs,
+}
+
+
+def render_pdf(document: Document) -> bytes:
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=(PAGE_W, PAGE_H))
+    c.setTitle(safe_text(document.title))
+    c.setAuthor(safe_text(document.author))
+    pen = Pen(c)
+
+    pages = document.pages or [None]
+    for page in pages:
+        title = page.title if page else ""
+        y = pen.new_page(title)
+        if page:
+            for block in page.blocks:
+                renderer = _DISPATCH.get(block.type)
+                if renderer:
+                    y = renderer(pen, block, y, title)
+    pen.finalize()
+    return buf.getvalue()
