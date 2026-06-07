@@ -1,0 +1,21 @@
+# Render Blueprint for PdfServer.
+# Deploy: push to GitHub, then in Render → New → Blueprint → pick this repo.
+# (Or New → Web Service and copy the build/start commands below.)
+services:
+  - type: web
+    name: pdfserver
+    runtime: python
+    plan: starter            # bump to standard if renders get heavy
+    region: oregon
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      # Optional shared secret. If set here, AgentServer must send the same value
+      # as `Authorization: Bearer <key>` (PDFSERVER_API_KEY on the AgentServer side).
+      - key: PDFSERVER_API_KEY
+        sync: false           # set the value in the Render dashboard, not in git

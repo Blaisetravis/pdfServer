@@ -81,6 +81,22 @@ class ImageGridBlock(BaseModel):
     max_height: float = 280.0
 
 
+class SwatchItem(BaseModel):
+    src: str                       # http(s) URL (generated swatch / hardware render)
+    label: Optional[str] = None    # bold name under the cell, e.g. "MAIN SHELL"
+    caption: Optional[str] = None  # small line, e.g. "14oz denim · Antique brass"
+
+
+class SwatchGridBlock(BaseModel):
+    """A grid of captioned square cards — fabric swatches and rendered hardware
+    for the BOM / materials page."""
+    type: Literal["swatch_grid"] = "swatch_grid"
+    id: Optional[str] = None
+    title: Optional[str] = None
+    cols: int = 3
+    swatches: list[SwatchItem] = Field(default_factory=list)
+
+
 class DividerBlock(BaseModel):
     type: Literal["divider"] = "divider"
     id: Optional[str] = None
@@ -126,6 +142,7 @@ Block = Annotated[
         TableBlock,
         SizeChartBlock,
         ImageGridBlock,
+        SwatchGridBlock,
         DividerBlock,
         SpacerBlock,
         AbsBlock,

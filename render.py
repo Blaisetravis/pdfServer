@@ -17,7 +17,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
-from reportlab.platypus import Paragraph
+from reportlab.platypus import Paragraph, Table, TableStyle
 from xml.sax.saxutils import escape
 
 from models import Document
@@ -55,6 +55,7 @@ class Pen:
         self.H = PAGE_H
         self.page_num = 0
         self._title = ""
+        self._content_top = INNER_Y + 30
 
     # geometry: top-down -> reportlab (bottom-left) ---------------------------
     def fill_rect(self, x, y_top, w, h, color):
@@ -134,12 +135,43 @@ class Pen:
         self.page_num += 1
         self._title = title
         self._border()
-        y = self._top_bar(title)
-        return y + 8
+        y = self._top_bar(title) + 8
+        self._content_top = y
+        return y
 
     def ensure_space(self, needed, y_top, title) -> float:
         if y_top + needed > INNER_Y + INNER_H:
             return self.new_page(title)
+        return y_top
+
+    def draw_flowable(self, flow, y_top, page_title, x=None, width=None) -> float:
+        """Draw a platypus Flowable (e.g. a Table) at top-down y_top, splitting
+        it across pages when it doesn't fit. Returns the y after the last piece."""
+        x = INNER_X + SECTION_PAD if x is None else x
+        width = INNER_W - 2 * SECTION_PAD if width is None else width
+        bottom = INNER_Y + INNER_H
+        while flow is not None:
+            avail_h = bottom - y_top
+            _w, h = flow.wrapOn(self.c, width, avail_h)
+            if h <= avail_h:
+                flow.drawOn(self.c, x, self.H - (y_top + h))
+                return y_top + h
+            parts = flow.split(width, avail_h)
+            if parts:
+                first = parts[0]
+                _w1, h1 = first.wrapOn(self.c, width, avail_h)
+                first.drawOn(self.c, x, self.H - (y_top + h1))
+                flow = parts[1] if len(parts) > 1 else None
+                if flow is not None:
+                    y_top = self.new_page(page_title)
+                else:
+                    return y_top + h1
+            elif abs(y_top - self._content_top) < 1:
+                # already on a fresh page and still won't fit / can't split → draw clipped
+                flow.drawOn(self.c, x, self.H - (y_top + h))
+                return y_top + h
+            else:
+                y_top = self.new_page(page_title)
         return y_top
 
     def finalize(self):
@@ -199,52 +231,67 @@ def render_spec_section(pen: Pen, b, y, title):
     return cy + CELL_PAD
 
 
-def _table_border(pen, x, top, width, height, col_w, col_n):
-    pen.stroke_rect(x, top, width, height, C["border"], 0.5)
-    for c in range(1, col_n):
-        pen.line(x + c * col_w, top, x + c * col_w, top + height, C["borderGrey"], 0.25)
+_ALIGN = {"left": 0, "center": 1, "right": 2}  # TA_LEFT / TA_CENTER / TA_RIGHT
+
+
+def _cell(text, *, bold=False, color=None, align="left", upper=False):
+    s = safe_text(text)
+    if upper:
+        s = s.upper()
+    style = ParagraphStyle(
+        "cell", fontName=F_BOLD if bold else F_REG, fontSize=FONT["small"],
+        textColor=color or C["darkGrey"], leading=FONT["small"] * 1.25,
+        alignment=_ALIGN[align],
+    )
+    return Paragraph(escape(s) or "—", style)
+
+
+def build_table(headers, rows, width):
+    """A platypus Table styled to match the house look — dark header, alternating
+    rows, thin grid. Cells are Paragraphs so long values WRAP instead of clipping,
+    and the header repeats when the table splits across pages."""
+    n = max(1, len(headers))
+    col_w = width / n
+    head = [_cell(h, bold=True, color=C["white"], align="left" if i == 0 else "center", upper=True)
+            for i, h in enumerate(headers)]
+    data = [head]
+    for row in rows:
+        data.append([
+            _cell(row[i] if i < len(row) else "—", align="left" if i == 0 else "center")
+            for i in range(n)
+        ])
+    t = Table(data, colWidths=[col_w] * n, repeatRows=1)
+    style = [
+        ("BACKGROUND", (0, 0), (-1, 0), C["headerBg"]),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LEFTPADDING", (0, 0), (-1, -1), CELL_PAD),
+        ("RIGHTPADDING", (0, 0), (-1, -1), CELL_PAD),
+        ("GRID", (0, 0), (-1, -1), 0.25, C["borderGrey"]),
+        ("BOX", (0, 0), (-1, -1), 0.5, C["border"]),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.5, C["border"]),
+    ]
+    for r in range(1, len(data)):
+        if (r - 1) % 2 == 0:
+            style.append(("BACKGROUND", (0, r), (-1, r), C["bgLight"]))
+    t.setStyle(TableStyle(style))
+    return t
 
 
 def render_table(pen: Pen, title, headers, rows, y, page_title):
     x = INNER_X + SECTION_PAD
     width = INNER_W - 2 * SECTION_PAD
     if title:
-        y = pen.ensure_space(40, y, page_title)
+        y = pen.ensure_space(60, y, page_title)
         pen.text(x, y, title, FONT["sectionTitle"], C["black"], bold=True)
         y += 18
         pen.line(x, y, x + width, y, C["border"], 0.5)
         y += 10
-    col_n = max(1, len(headers))
-    col_w = width / col_n
-    header_h, row_h = 22, 20
-
-    def draw_header(yy):
-        pen.fill_rect(x, yy, width, header_h, C["headerBg"])
-        for c, h in enumerate(headers):
-            pen.text(x + c * col_w + CELL_PAD, yy + 6, str(h).upper(), FONT["small"],
-                     C["white"], bold=True, align="left" if c == 0 else "center",
-                     width=col_w - 2 * CELL_PAD)
-        return yy + header_h
-
-    y = pen.ensure_space(header_h + row_h, y, page_title)
-    top = y
-    y = draw_header(y)
-    for r, row in enumerate(rows):
-        if y + row_h > INNER_Y + INNER_H:
-            _table_border(pen, x, top, width, y - top, col_w, col_n)
-            y = pen.new_page(page_title)
-            top = y
-            y = draw_header(y)
-        if r % 2 == 0:
-            pen.fill_rect(x, y, width, row_h, C["bgLight"])
-        pen.stroke_rect(x, y, width, row_h, C["borderGrey"], 0.25)
-        for c in range(col_n):
-            val = row[c] if c < len(row) else "—"
-            pen.text(x + c * col_w + CELL_PAD, y + 6, val if val not in (None, "") else "—",
-                     FONT["small"], C["darkGrey"], align="left" if c == 0 else "center",
-                     width=col_w - 2 * CELL_PAD)
-        y += row_h
-    _table_border(pen, x, top, width, y - top, col_w, col_n)
+    if not headers:
+        return y
+    table = build_table(headers, rows, width)
+    y = pen.draw_flowable(table, y, page_title, x=x, width=width)
     return y + CELL_PAD
 
 
@@ -279,6 +326,36 @@ def render_image_grid(pen: Pen, b, y, page_title):
             pen.text(ix, y + maxh + 4, (label or "IMAGE").upper(), FONT["small"],
                      C["medGrey"], align="center", width=cell_w)
         y += maxh + 24
+    return y
+
+
+def render_swatch_grid(pen: Pen, b, y, page_title):
+    cols = max(1, b.cols)
+    gap = 16
+    cell = (INNER_W - (cols + 1) * gap) / cols  # square card side
+    label_block = 24  # room for label + caption under each card
+    if b.title:
+        y = pen.ensure_space(30, y, page_title)
+        pen.text(INNER_X + SECTION_PAD, y, b.title, FONT["sectionTitle"], C["black"], bold=True)
+        y += 18
+        pen.line(INNER_X, y, INNER_X + INNER_W, y, C["border"], 0.5)
+        y += 10
+    items = [(fetch_image(s.src), s.label, s.caption) for s in b.swatches]
+    for row in _chunk(items, cols):
+        y = pen.ensure_space(cell + label_block + 8, y, page_title)
+        for c, (img, label, caption) in enumerate(row):
+            ix = INNER_X + gap + c * (cell + gap)
+            if img is not None:
+                pen.image(img, ix, y, cell, cell)
+            else:
+                pen.stroke_rect(ix, y, cell, cell, C["borderGrey"], 0.5)
+            ly = y + cell + 4
+            if label:
+                pen.text(ix, ly, label, FONT["label"], C["black"], bold=True, align="center", width=cell)
+                ly += 11
+            if caption:
+                pen.text(ix, ly, caption, FONT["small"], C["medGrey"], align="center", width=cell)
+        y += cell + label_block + 8
     return y
 
 
@@ -325,6 +402,7 @@ _DISPATCH = {
     "table": lambda pen, b, y, t: render_table(pen, b.title, b.headers, b.rows, y, t),
     "size_chart": render_size_chart,
     "image_grid": render_image_grid,
+    "swatch_grid": render_swatch_grid,
     "text": render_text,
     "divider": render_divider,
     "spacer": render_spacer,

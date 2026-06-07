@@ -56,9 +56,16 @@ in tech-pack measurements, so this matters.
 - `test_render.py` — smoke test
 
 ## Deploy (Render)
+A `render.yaml` blueprint is included. **New → Blueprint → pick this repo**, or set up a
+Web Service manually with:
 - Build: `pip install -r requirements.txt`
 - Start: `uvicorn app:app --host 0.0.0.0 --port $PORT`
-- `.python-version` pins 3.12 for the platform (local dev on 3.14 is fine).
+- Health check: `/health`
+- `.python-version` pins 3.12 (local dev on 3.14 is fine).
+
+After it's live, on the **AgentServer** side set `PDFSERVER_URL=https://<your-pdfserver>.onrender.com`
+(it defaults to `http://localhost:8080`). If you set `PDFSERVER_API_KEY` on this service,
+set the same value on AgentServer so it sends `Authorization: Bearer <key>`.
 
 ## Status / TODO
 - v0: render + raster working end-to-end; house style matches current PDFs.
