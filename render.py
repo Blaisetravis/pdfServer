@@ -339,10 +339,16 @@ def _draw_cards(pen, items, cols, cell, gap, y, page_title, *, label_size):
         n = len(row)
         row_w = n * cell + (n - 1) * gap
         start_x = INNER_X + max(0, (INNER_W - row_w) / 2)  # center the row
-        for c, (img, label, cap) in enumerate(row):
+        for c, (img, label, cap, color) in enumerate(row):
             ix = start_x + c * (cell + gap)
             if img is not None:
                 pen.image(img, ix, y, cell, cell)
+            elif color:
+                try:
+                    pen.fill_rect(ix, y, cell, cell, HexColor(color))
+                except Exception:
+                    pass
+                pen.stroke_rect(ix, y, cell, cell, C["borderGrey"], 0.5)
             else:
                 pen.stroke_rect(ix, y, cell, cell, C["borderGrey"], 0.5)
             ly = y + cell + 4
@@ -357,10 +363,13 @@ def _draw_cards(pen, items, cols, cell, gap, y, page_title, *, label_size):
 
 def render_swatch_grid(pen: Pen, b, y, page_title):
     gap = 16
-    # Cards WITH an image (fabric swatches, hardware/print renders) render BIG;
-    # blank label/packaging cards (no src) render COMPACT so they don't sprawl.
-    img_items = [(fetch_image(s.src), s.label, s.caption) for s in b.swatches if s.src]
-    blank_items = [(None, s.label, s.caption) for s in b.swatches if not s.src]
+    # Cards WITH a visual (image swatch/render, or a solid colour chip) render
+    # BIG; blank label/packaging cards (no image, no colour) render COMPACT.
+    vis_items = [
+        (fetch_image(s.src) if s.src else None, s.label, s.caption, s.color)
+        for s in b.swatches if (s.src or s.color)
+    ]
+    blank_items = [(None, s.label, s.caption, None) for s in b.swatches if not (s.src or s.color)]
 
     if b.title:
         y = pen.ensure_space(30, y, page_title)
@@ -369,12 +378,12 @@ def render_swatch_grid(pen: Pen, b, y, page_title):
         pen.line(INNER_X, y, INNER_X + INNER_W, y, C["border"], 0.5)
         y += 10
 
-    if img_items:
-        # Use no more columns than there are image cards, so 2 cards fill the
-        # width (big, side-by-side) instead of leaving empty columns on the right.
-        cols = max(1, min(b.cols, len(img_items)))
+    if vis_items:
+        # Use no more columns than there are cards, so 2 cards fill the width
+        # (big, side-by-side) instead of leaving empty columns on the right.
+        cols = max(1, min(b.cols, len(vis_items)))
         cell = min((INNER_W - (cols + 1) * gap) / cols, 280)  # cap so 1 card isn't oversized
-        y = _draw_cards(pen, img_items, cols, cell, gap, y, page_title, label_size=FONT["label"])
+        y = _draw_cards(pen, vis_items, cols, cell, gap, y, page_title, label_size=FONT["label"])
 
     if blank_items:
         y += 6

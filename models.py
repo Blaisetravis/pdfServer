@@ -83,7 +83,10 @@ class ImageGridBlock(BaseModel):
 
 class SwatchItem(BaseModel):
     # src optional: label/packaging rows render as a blank captioned card (no image).
+    # color optional: a solid colour chip (hex) when there's no image — colorway
+    # chips, BOM trim chips. Priority: src image > color chip > blank outline.
     src: Optional[str] = None      # http(s) URL (generated swatch / hardware render)
+    color: Optional[str] = None    # hex for a solid colour chip, e.g. "#1A1A1A"
     label: Optional[str] = None    # bold name under the cell, e.g. "MAIN SHELL"
     caption: Optional[str] = None  # small line, e.g. "14oz denim · Antique brass"
 
