@@ -107,6 +107,16 @@ class Pen:
         except Exception as e:
             print(f"[render] drawImage failed: {e}")
 
+    def circle(self, x, y_top, r, fill=None, stroke=None, lw=1.0):
+        if fill is not None:
+            self.c.setFillColor(fill)
+        if stroke is not None:
+            self.c.setStrokeColor(stroke)
+            self.c.setLineWidth(lw)
+        self.c.circle(x, self.H - y_top, r,
+                      stroke=1 if stroke is not None else 0,
+                      fill=1 if fill is not None else 0)
+
     # page chrome -------------------------------------------------------------
     def _border(self):
         self.stroke_rect(INNER_X, INNER_Y, INNER_W, INNER_H, C["border"], 1)
@@ -430,6 +440,62 @@ def render_abs(pen: Pen, b, y, page_title):
     return y
 
 
+def render_callouts(pen: Pen, b, y, page_title):
+    if b.view:
+        y = pen.ensure_space(26, y, page_title)
+        pen.text(INNER_X + SECTION_PAD, y, b.view.upper(), FONT["sectionTitle"], C["black"], bold=True)
+        y += 20
+
+    img = fetch_image(b.image)
+    box_w = INNER_W * 0.66          # leave side margins for the circles + leader lines
+    box_h = b.max_height
+    y = pen.ensure_space(box_h + 16, y, page_title)
+
+    if img is not None:
+        iw, ih = img.size
+        scale = min(box_w / iw, box_h / ih)
+        dw, dh = iw * scale, ih * scale
+        ix = INNER_X + (INNER_W - dw) / 2
+        iy = y
+        pen.image(img, ix, iy, dw, dh)
+
+        # Marker colour — Aria picks one that pops against the garment; default red.
+        try:
+            accent = HexColor(b.accent) if b.accent else HexColor("#E11D2A")
+        except Exception:
+            accent = HexColor("#E11D2A")
+
+        r = 9.0
+        spacing = 2 * r + 8
+        clamp01 = lambda v: max(0.0, min(1.0, v))
+
+        def place(side_points, circle_x):
+            prev_cy = iy - spacing
+            for p in side_points:
+                fx = ix + clamp01(p.x) * dw
+                fy = iy + clamp01(p.y) * dh
+                cy = min(max(fy, prev_cy + spacing), iy + dh)
+                prev_cy = cy
+                pen.line(circle_x, cy, fx, fy, accent, 1.0)           # leader line
+                pen.circle(fx, fy, 2.2, fill=accent)                  # dot on the feature
+                pen.circle(circle_x, cy, r, fill=C["white"], stroke=accent, lw=1.4)
+                pen.text(circle_x - r, cy - 3.0, str(p.n), 8, accent, bold=True, align="center", width=2 * r)
+
+        left = sorted([p for p in b.points if p.x < 0.5], key=lambda p: p.y)
+        right = sorted([p for p in b.points if p.x >= 0.5], key=lambda p: p.y)
+        place(left, INNER_X + 16)
+        place(right, INNER_X + INNER_W - 16)
+        y = iy + dh + 14
+    else:
+        pen.stroke_rect(INNER_X, y, box_w, box_h, C["borderGrey"], 0.5)
+        y += box_h + 14
+
+    if b.points:
+        rows = [[str(p.n), (p.label or "").upper()] for p in sorted(b.points, key=lambda p: p.n)]
+        y = render_table(pen, "CALLOUTS", ["#", "DETAIL"], rows, y, page_title)
+    return y
+
+
 _DISPATCH = {
     "header": render_header,
     "spec_section": render_spec_section,
@@ -437,6 +503,7 @@ _DISPATCH = {
     "size_chart": render_size_chart,
     "image_grid": render_image_grid,
     "swatch_grid": render_swatch_grid,
+    "callouts": render_callouts,
     "text": render_text,
     "divider": render_divider,
     "spacer": render_spacer,

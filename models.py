@@ -101,6 +101,26 @@ class SwatchGridBlock(BaseModel):
     swatches: list[SwatchItem] = Field(default_factory=list)
 
 
+class CalloutPoint(BaseModel):
+    n: int                         # callout number (shown in the margin circle + legend)
+    x: float                       # 0..1 position of the FEATURE on the image
+    y: float
+    label: str = ""                # short uppercase detail, e.g. "RIBBED CREW NECK"
+
+
+class CalloutsBlock(BaseModel):
+    """A garment flat with numbered callout circles in the margin, each with a
+    leader line to its real feature, plus a legend table (# -> detail)."""
+    type: Literal["callouts"] = "callouts"
+    id: Optional[str] = None
+    image: str                     # src URL of the garment flat
+    view: Optional[str] = None     # "FRONT" / "BACK"
+    points: list[CalloutPoint] = Field(default_factory=list)
+    max_height: float = 380.0
+    accent: Optional[str] = None   # hex for leaders/dots/numbers — pick for contrast
+                                   # vs the garment; defaults to a high-vis red.
+
+
 class DividerBlock(BaseModel):
     type: Literal["divider"] = "divider"
     id: Optional[str] = None
@@ -147,6 +167,7 @@ Block = Annotated[
         SizeChartBlock,
         ImageGridBlock,
         SwatchGridBlock,
+        CalloutsBlock,
         DividerBlock,
         SpacerBlock,
         AbsBlock,
