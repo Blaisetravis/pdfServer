@@ -82,7 +82,8 @@ class ImageGridBlock(BaseModel):
 
 
 class SwatchItem(BaseModel):
-    src: str                       # http(s) URL (generated swatch / hardware render)
+    # src optional: label/packaging rows render as a blank captioned card (no image).
+    src: Optional[str] = None      # http(s) URL (generated swatch / hardware render)
     label: Optional[str] = None    # bold name under the cell, e.g. "MAIN SHELL"
     caption: Optional[str] = None  # small line, e.g. "14oz denim · Antique brass"
 
