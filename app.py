@@ -19,7 +19,8 @@ import os
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, Response
 
-from models import RasterRequest, RenderRequest
+from models import RasterRequest, RenderRequest, CalloutsBlock
+from callout_layout import layout_callouts
 from raster import page_count, render_page_png
 from render import render_pdf
 from canvas_export import CanvasExportRequest, render_canvas_pdf
@@ -40,6 +41,15 @@ def _check_auth(authorization: str | None):
 @app.get("/health")
 def health():
     return {"ok": True, "service": "pdfServer", "version": "0.1.0"}
+
+
+@app.post("/api/pdf/callouts/layout")
+def callouts_layout(req: CalloutsBlock, authorization: str | None = Header(default=None)):
+    _check_auth(authorization)
+    try:
+        return layout_callouts(req)
+    except (ValueError, OSError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.post("/api/pdf/render")

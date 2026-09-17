@@ -344,14 +344,24 @@ def render_image_grid(pen: Pen, b, y, page_title):
     maxh = b.max_height
     items = [(fetch_image(it.src), it.label) for it in b.images]
     for row in _chunk(items, cols):
-        y = pen.ensure_space(maxh + 24, y, page_title)
+        image_h = max((min(maxh, cell_w * img.height / img.width) if img is not None else maxh for img, _ in row), default=maxh)
+        captions = []
+        caption_h = 0
+        for _, label in row:
+            paragraph = Paragraph(escape(safe_text(label or "")).replace("\n", "<br/>"),
+                                  ParagraphStyle("image-caption", fontName=F_REG, fontSize=FONT["small"],
+                                                 leading=FONT["small"] * 1.3, textColor=C["medGrey"], alignment=1))
+            _, height = paragraph.wrap(cell_w, INNER_H)
+            captions.append((paragraph, height))
+            caption_h = max(caption_h, height)
+        y = pen.ensure_space(image_h + caption_h + 14, y, page_title)
         for c, (img, label) in enumerate(row):
             ix = INNER_X + gap + c * (cell_w + gap)
             if img is not None:
-                pen.image(img, ix, y, cell_w, maxh)
-            pen.text(ix, y + maxh + 4, (label or "IMAGE").upper(), FONT["small"],
-                     C["medGrey"], align="center", width=cell_w)
-        y += maxh + 24
+                pen.image(img, ix, y, cell_w, image_h)
+            paragraph, height = captions[c]
+            paragraph.drawOn(pen.c, ix, pen.H - (y + image_h + 4 + height))
+        y += image_h + caption_h + 14
     return y
 
 
@@ -486,11 +496,13 @@ def render_callouts(pen: Pen, b, y, page_title):
         clamp01 = lambda v: max(0.0, min(1.0, v))
 
         def place(side_points, circle_x):
-            prev_cy = iy - spacing
-            for p in side_points:
+            effective_spacing = min(spacing, dh / max(1, len(side_points) - 1))
+            prev_cy = iy - effective_spacing
+            for index, p in enumerate(side_points):
                 fx = ix + clamp01(p.x) * dw
                 fy = iy + clamp01(p.y) * dh
-                cy = min(max(fy, prev_cy + spacing), iy + dh)
+                last_available = iy + dh - (len(side_points) - index - 1) * effective_spacing
+                cy = min(max(fy, prev_cy + effective_spacing), last_available)
                 prev_cy = cy
                 pen.line(circle_x, cy, fx, fy, accent, 1.0)           # leader line
                 pen.circle(fx, fy, 2.2, fill=accent)                  # dot on the feature
