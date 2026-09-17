@@ -8,6 +8,7 @@ the black-box glyph problem.
 """
 
 from io import BytesIO
+import base64
 from typing import Optional
 
 import requests
@@ -32,6 +33,21 @@ C = COLORS  # shorthand
 # --- image fetch ------------------------------------------------------------
 
 def fetch_image(src: str) -> Optional[Image.Image]:
+    # Canvas artwork is embedded so an export needs no temporary public upload.
+    if isinstance(src, str) and src.startswith("data:image/"):
+        header, encoded = src.split(",", 1)
+        if header not in ("data:image/png;base64", "data:image/jpeg;base64") or len(encoded) > 8000000:
+            raise ValueError("Invalid embedded artwork")
+        img = Image.open(BytesIO(base64.b64decode(encoded, validate=True)))
+        if img.width * img.height > 40000000:
+            raise ValueError("Embedded artwork is too large")
+        img.load()
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            rgba = img.convert("RGBA")
+            background = Image.new("RGB", rgba.size, "white")
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            return background
+        return img.convert("RGB")
     if not src or not str(src).startswith("http"):
         return None
     try:
