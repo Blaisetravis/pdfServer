@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from models import RasterRequest, RenderRequest
 from raster import page_count, render_page_png
 from render import render_pdf
+from canvas_export import CanvasExportRequest, render_canvas_pdf
 
 app = FastAPI(title="PdfServer", version="0.1.0")
 
@@ -53,6 +54,18 @@ def render(req: RenderRequest, authorization: str | None = Header(default=None))
             "Content-Disposition": 'inline; filename="techpack.pdf"',
         },
     )
+
+
+@app.post("/api/pdf/canvas")
+def canvas_export(req: CanvasExportRequest, authorization: str | None = Header(default=None)):
+    _check_auth(authorization)
+    try:
+        pdf = render_canvas_pdf(req)
+    except (ValueError, OSError) as error:
+        raise HTTPException(status_code=422, detail="Invalid canvas content") from error
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"X-Page-Count": str(len(req.pages)),
+                             "Content-Disposition": 'attachment; filename="techpack.pdf"'})
 
 
 @app.post("/api/pdf/raster")
