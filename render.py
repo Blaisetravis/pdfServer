@@ -260,7 +260,7 @@ def render_spec_section(pen: Pen, b, y, title):
 _ALIGN = {"left": 0, "center": 1, "right": 2}  # TA_LEFT / TA_CENTER / TA_RIGHT
 
 
-def _cell(text, *, bold=False, color=None, align="left", upper=False):
+def _cell(text, *, bold=False, color=None, align="left", upper=False, placeholder="—"):
     s = safe_text(text)
     if upper:
         s = s.upper()
@@ -269,26 +269,33 @@ def _cell(text, *, bold=False, color=None, align="left", upper=False):
         textColor=color or C["darkGrey"], leading=FONT["small"] * 1.25,
         alignment=_ALIGN[align],
     )
-    return Paragraph(escape(s) or "—", style)
+    return Paragraph(escape(s) or placeholder, style)
 
 
 def build_table(headers, rows, width):
     """A platypus Table styled to match the house look — dark header, alternating
     rows, thin grid. Cells are Paragraphs so long values WRAP instead of clipping,
-    and the header repeats when the table splits across pages."""
+    and the header repeats when the table splits across pages.
+
+    Headers only size the columns when they carry no text: blank header cells
+    render blank (never a placeholder dash), and a header row with no text at
+    all is omitted so headerless source tables do not gain a fake header."""
     n = max(1, len(headers))
     col_w = width / n
-    head = [_cell(h, bold=True, color=C["white"], align="left" if i == 0 else "center", upper=True)
-            for i, h in enumerate(headers)]
-    data = [head]
+    has_header = any(safe_text(h).strip() for h in headers)
+    data = []
+    if has_header:
+        data.append([_cell(h, bold=True, color=C["white"], align="left" if i == 0 else "center", upper=True, placeholder="&nbsp;")
+                     for i, h in enumerate(headers)])
     for row in rows:
         data.append([
             _cell(row[i] if i < len(row) else "—", align="left" if i == 0 else "center")
             for i in range(n)
         ])
-    t = Table(data, colWidths=[col_w] * n, repeatRows=1)
+    if not data:
+        return None
+    t = Table(data, colWidths=[col_w] * n, repeatRows=1 if has_header else 0)
     style = [
-        ("BACKGROUND", (0, 0), (-1, 0), C["headerBg"]),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
@@ -296,10 +303,15 @@ def build_table(headers, rows, width):
         ("RIGHTPADDING", (0, 0), (-1, -1), CELL_PAD),
         ("GRID", (0, 0), (-1, -1), 0.25, C["borderGrey"]),
         ("BOX", (0, 0), (-1, -1), 0.5, C["border"]),
-        ("LINEBELOW", (0, 0), (-1, 0), 0.5, C["border"]),
     ]
-    for r in range(1, len(data)):
-        if (r - 1) % 2 == 0:
+    if has_header:
+        style += [
+            ("BACKGROUND", (0, 0), (-1, 0), C["headerBg"]),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.5, C["border"]),
+        ]
+    first_body = 1 if has_header else 0
+    for r in range(first_body, len(data)):
+        if (r - first_body) % 2 == 0:
             style.append(("BACKGROUND", (0, r), (-1, r), C["bgLight"]))
     t.setStyle(TableStyle(style))
     return t
@@ -317,6 +329,8 @@ def render_table(pen: Pen, title, headers, rows, y, page_title):
     if not headers:
         return y
     table = build_table(headers, rows, width)
+    if table is None:
+        return y
     y = pen.draw_flowable(table, y, page_title, x=x, width=width)
     return y + CELL_PAD
 
