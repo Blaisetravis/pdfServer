@@ -9,6 +9,7 @@ Endpoints:
   GET  /health
   POST /api/pdf/render   -> application/pdf            (body: {document})
   POST /api/pdf/raster   -> image/png                  (body: {document, page, scale})
+       ?fmt=json&all_pages -> {page_count, png_base64, pages:[{page, png_base64}]}
 
 Optional auth: set PDFSERVER_API_KEY to require `Authorization: Bearer <key>`.
 """
@@ -21,7 +22,7 @@ from fastapi.responses import JSONResponse, Response
 
 from models import RasterRequest, RenderRequest, CalloutsBlock
 from callout_layout import layout_callouts
-from raster import page_count, render_page_png
+from raster import page_count, render_all_pages_png, render_page_png
 from render import render_pdf
 from canvas_export import CanvasExportRequest, render_canvas_pdf
 
@@ -89,6 +90,15 @@ def raster(req: RasterRequest, authorization: str | None = Header(default=None),
     _check_auth(authorization)
     pdf = render_pdf(req.document)
     total = page_count(pdf)
+    if fmt == "json" and req.all_pages:
+        pages = [base64.b64encode(png).decode("ascii") for png in render_all_pages_png(pdf, scale=req.scale)]
+        idx = max(0, min(req.page - 1, total - 1))
+        return JSONResponse({
+            "page": req.page,
+            "page_count": total,
+            "png_base64": pages[idx],
+            "pages": [{"page": i + 1, "png_base64": png} for i, png in enumerate(pages)],
+        })
     png = render_page_png(pdf, page=req.page, scale=req.scale)
     if fmt == "json":
         return JSONResponse({

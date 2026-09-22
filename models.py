@@ -200,3 +200,4 @@ class RasterRequest(BaseModel):
     document: Document
     page: int = 1                   # 1-based page number to rasterize
     scale: float = 2.0              # render scale for the PNG
+    all_pages: bool = False         # fmt=json only: also return every page in one response
