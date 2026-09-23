@@ -5,8 +5,14 @@ The `Pen` class wraps a ReportLab canvas and exposes TOP-DOWN drawing helpers
 (y grows downward, like the original pdfkit layout.js) so the block renderers
 read like the existing JS. All user text goes through style.safe_text() to avoid
 the black-box glyph problem.
+
+Every primitive call is wrapped in a block/tag context that names the model
+node it draws (see `Pen.block` / `Pen.tag`). The PDF pen ignores the context;
+`layout.LayoutPen` records it so the same renderer code can produce editable,
+model-bound canvas geometry. Keep the drawing calls and the tags together.
 """
 
+from contextlib import nullcontext
 from io import BytesIO
 import base64
 from typing import Optional
@@ -28,6 +34,13 @@ from style import (
 )
 
 C = COLORS  # shorthand
+
+
+# --- model paths ------------------------------------------------------------
+
+def pointer(*parts) -> str:
+    """JSON Pointer (RFC 6901) into a block, e.g. pointer("rows", 2, 1) -> "/rows/2/1"."""
+    return "".join("/" + str(part).replace("~", "~0").replace("/", "~1") for part in parts)
 
 
 # --- image fetch ------------------------------------------------------------
@@ -73,6 +86,16 @@ class Pen:
         self._title = ""
         self._content_top = INNER_Y + 30
 
+    # model context: no-ops for the PDF, recorded by LayoutPen -----------------
+    def block(self, block_id, block_type):
+        return nullcontext()
+
+    def tag(self, role, field=None, **extra):
+        return nullcontext()
+
+    def load_image(self, src):
+        return fetch_image(src)
+
     # geometry: top-down -> reportlab (bottom-left) ---------------------------
     def fill_rect(self, x, y_top, w, h, color):
         self.c.setFillColor(color)
@@ -102,19 +125,24 @@ class Pen:
             tx = x + (width - sw) / 2 if align == "center" else x + width - sw
         self.c.drawString(tx, self.H - (y_top + size), s)
 
-    def paragraph(self, x, y_top, s, width, size, color, bold=False, leading=None) -> float:
-        font = F_BOLD if bold else F_REG
+    def make_paragraph(self, s, size, color, bold=False, leading=None, align="left"):
         style = ParagraphStyle(
-            "p", fontName=font, fontSize=size, textColor=color,
-            leading=leading or size * 1.3,
+            "p", fontName=F_BOLD if bold else F_REG, fontSize=size, textColor=color,
+            leading=leading or size * 1.3, alignment=_ALIGN[align],
         )
-        html = escape(safe_text(s)).replace("\n", "<br/>")
-        p = Paragraph(html, style)
-        w, h = p.wrapOn(self.c, width, 100000)
+        return Paragraph(escape(safe_text(s)).replace("\n", "<br/>"), style)
+
+    def place_paragraph(self, p, x, y_top, h):
+        """Place an already wrapped Paragraph with its top at y_top."""
         p.drawOn(self.c, x, self.H - (y_top + h))
+
+    def paragraph(self, x, y_top, s, width, size, color, bold=False, leading=None) -> float:
+        p = self.make_paragraph(s, size, color, bold=bold, leading=leading)
+        w, h = p.wrapOn(self.c, width, 100000)
+        self.place_paragraph(p, x, y_top, h)
         return h
 
-    def image(self, img: Image.Image, x, y_top, w, h):
+    def image(self, img, x, y_top, w, h):
         try:
             self.c.drawImage(
                 ImageReader(img), x, self.H - (y_top + h),
@@ -135,24 +163,29 @@ class Pen:
 
     # page chrome -------------------------------------------------------------
     def _border(self):
-        self.stroke_rect(INNER_X, INNER_Y, INNER_W, INNER_H, C["border"], 1)
+        with self.tag("page_border"):
+            self.stroke_rect(INNER_X, INNER_Y, INNER_W, INNER_H, C["border"], 1)
 
     def _top_bar(self, title) -> float:
         bar_h = 22
-        self.fill_rect(INNER_X, INNER_Y, INNER_W, bar_h, C["headerBg"])
-        self.text(INNER_X + CELL_PAD, INNER_Y + 7, "T C H P A C K",
-                  FONT["pageTitle"], C["white"], bold=True)
+        with self.tag("page_bar"):
+            self.fill_rect(INNER_X, INNER_Y, INNER_W, bar_h, C["headerBg"])
+        with self.tag("page_brand"):
+            self.text(INNER_X + CELL_PAD, INNER_Y + 7, "T C H P A C K",
+                      FONT["pageTitle"], C["white"], bold=True)
         if title:
-            self.text(INNER_X + INNER_W / 2, INNER_Y + 7, title.upper(),
-                      FONT["pageTitle"], C["white"], bold=True,
-                      align="right", width=INNER_W / 2 - CELL_PAD)
+            with self.tag("page_title", "/title"):
+                self.text(INNER_X + INNER_W / 2, INNER_Y + 7, title.upper(),
+                          FONT["pageTitle"], C["white"], bold=True,
+                          align="right", width=INNER_W / 2 - CELL_PAD)
         return INNER_Y + bar_h
 
     def _footer(self):
-        self.text(MARGIN, PAGE_H - MARGIN - 14, f"Page {self.page_num}",
-                  FONT["small"], C["lightGrey"], align="center", width=CONTENT_W)
+        with self.tag("page_footer"):
+            self.text(MARGIN, PAGE_H - MARGIN - 14, f"Page {self.page_num}",
+                      FONT["small"], C["lightGrey"], align="center", width=CONTENT_W)
 
-    def new_page(self, title) -> float:
+    def new_page(self, title, page_id=None) -> float:
         """Close the current page (if any) and start a fresh one. Returns the
         starting y (top-down) for content."""
         if self.page_num > 0:
@@ -170,6 +203,9 @@ class Pen:
             return self.new_page(title)
         return y_top
 
+    def _place_flowable(self, flow, x, y_top, h):
+        flow.drawOn(self.c, x, self.H - (y_top + h))
+
     def draw_flowable(self, flow, y_top, page_title, x=None, width=None) -> float:
         """Draw a platypus Flowable (e.g. a Table) at top-down y_top, splitting
         it across pages when it doesn't fit. Returns the y after the last piece."""
@@ -180,13 +216,13 @@ class Pen:
             avail_h = bottom - y_top
             _w, h = flow.wrapOn(self.c, width, avail_h)
             if h <= avail_h:
-                flow.drawOn(self.c, x, self.H - (y_top + h))
+                self._place_flowable(flow, x, y_top, h)
                 return y_top + h
             parts = flow.split(width, avail_h)
             if parts:
                 first = parts[0]
                 _w1, h1 = first.wrapOn(self.c, width, avail_h)
-                first.drawOn(self.c, x, self.H - (y_top + h1))
+                self._place_flowable(first, x, y_top, h1)
                 flow = parts[1] if len(parts) > 1 else None
                 if flow is not None:
                     y_top = self.new_page(page_title)
@@ -194,7 +230,7 @@ class Pen:
                     return y_top + h1
             elif abs(y_top - self._content_top) < 1:
                 # already on a fresh page and still won't fit / can't split → draw clipped
-                flow.drawOn(self.c, x, self.H - (y_top + h))
+                self._place_flowable(flow, x, y_top, h)
                 return y_top + h
             else:
                 y_top = self.new_page(page_title)
@@ -217,50 +253,61 @@ def render_header(pen: Pen, b, y, title):
     cols = max(1, b.columns)
     col_w = INNER_W / cols
     row_h = 20
-    for row in _chunk(b.fields, cols):
-        pen.stroke_rect(INNER_X, y, INNER_W, row_h, C["border"], 0.5)
+    for row_index, row in enumerate(_chunk(b.fields, cols)):
+        with pen.tag("grid_border"):
+            pen.stroke_rect(INNER_X, y, INNER_W, row_h, C["border"], 0.5)
         for c, cell in enumerate(row):
+            index = row_index * cols + c
             cx = INNER_X + c * col_w
             if c > 0:
-                pen.line(cx, y, cx, y + row_h, C["border"], 0.5)
+                with pen.tag("grid_divider"):
+                    pen.line(cx, y, cx, y + row_h, C["border"], 0.5)
             label = f"{(cell.label or '').upper()}:"
-            pen.text(cx + CELL_PAD, y + 4, label, FONT["headerBar"], C["black"], bold=True)
+            with pen.tag("label", pointer("fields", index, "label")):
+                pen.text(cx + CELL_PAD, y + 4, label, FONT["headerBar"], C["black"], bold=True)
             lw = pen.string_width(label + " ", FONT["headerBar"], bold=True)
-            pen.text(cx + CELL_PAD + lw + 2, y + 4, cell.value or "",
-                     FONT["headerBar"], C["darkGrey"])
+            with pen.tag("value", pointer("fields", index, "value")):
+                pen.text(cx + CELL_PAD + lw + 2, y + 4, cell.value or "",
+                         FONT["headerBar"], C["darkGrey"])
         y += row_h
     return y + CELL_PAD
 
 
-def _render_field(pen, f, x, y, width):
+def _render_field(pen, f, x, y, width, path):
     label = f"{f.label.upper()}:"
-    pen.text(x, y, label, FONT["label"], C["black"], bold=True)
+    with pen.tag("label", path + "/label"):
+        pen.text(x, y, label, FONT["label"], C["black"], bold=True)
     lw = pen.string_width(label + " ", FONT["label"], bold=True)
-    h = pen.paragraph(x + lw + 4, y, f.value or "—", width - lw - 4, FONT["body"], C["darkGrey"])
+    with pen.tag("value", path + "/value"):
+        h = pen.paragraph(x + lw + 4, y, f.value or "—", width - lw - 4, FONT["body"], C["darkGrey"])
     return y + max(h, 12) + 4
 
 
 def render_spec_section(pen: Pen, b, y, title):
     y = pen.ensure_space(60, y, title)
-    pen.text(INNER_X + SECTION_PAD, y + 5, b.title, FONT["sectionTitle"], C["black"], bold=True)
+    with pen.tag("heading", "/title"):
+        pen.text(INNER_X + SECTION_PAD, y + 5, b.title, FONT["sectionTitle"], C["black"], bold=True)
     content_start = y + 20
-    pen.line(INNER_X, content_start, INNER_X + INNER_W, content_start, C["border"], 0.5)
+    with pen.tag("rule"):
+        pen.line(INNER_X, content_start, INNER_X + INNER_W, content_start, C["border"], 0.5)
     cx = INNER_X + SECTION_PAD
     cw = INNER_W - 2 * SECTION_PAD
     cy = content_start + CELL_PAD
     if b.body:
-        cy += pen.paragraph(cx, cy, b.body, cw, FONT["body"], C["darkGrey"]) + 4
-    for f in b.fields:
-        cy = _render_field(pen, f, cx, cy, cw)
-    for bullet in b.bullets:
-        cy += pen.paragraph(cx, cy, f"•  {bullet}", cw, FONT["body"], C["darkGrey"]) + 3
+        with pen.tag("body", "/body"):
+            cy += pen.paragraph(cx, cy, b.body, cw, FONT["body"], C["darkGrey"]) + 4
+    for index, f in enumerate(b.fields):
+        cy = _render_field(pen, f, cx, cy, cw, pointer("fields", index))
+    for index, bullet in enumerate(b.bullets):
+        with pen.tag("bullet", pointer("bullets", index)):
+            cy += pen.paragraph(cx, cy, f"•  {bullet}", cw, FONT["body"], C["darkGrey"]) + 3
     return cy + CELL_PAD
 
 
 _ALIGN = {"left": 0, "center": 1, "right": 2}  # TA_LEFT / TA_CENTER / TA_RIGHT
 
 
-def _cell(text, *, bold=False, color=None, align="left", upper=False, placeholder="—"):
+def _cell(text, *, bold=False, color=None, align="left", upper=False, placeholder="—", role="cell", field=None):
     s = safe_text(text)
     if upper:
         s = s.upper()
@@ -269,29 +316,42 @@ def _cell(text, *, bold=False, color=None, align="left", upper=False, placeholde
         textColor=color or C["darkGrey"], leading=FONT["small"] * 1.25,
         alignment=_ALIGN[align],
     )
-    return Paragraph(escape(s) or placeholder, style)
+    p = Paragraph(escape(s) or placeholder, style)
+    # Split tables keep their Paragraph objects, so the binding rides on the cell.
+    p._aria = {"role": role, "field": field}
+    return p
 
 
-def build_table(headers, rows, width):
+def build_table(headers, rows, width, header_fields=None, row_fields=None):
     """A platypus Table styled to match the house look — dark header, alternating
     rows, thin grid. Cells are Paragraphs so long values WRAP instead of clipping,
     and the header repeats when the table splits across pages.
 
     Headers only size the columns when they carry no text: blank header cells
     render blank (never a placeholder dash), and a header row with no text at
-    all is omitted so headerless source tables do not gain a fake header."""
+    all is omitted so headerless source tables do not gain a fake header.
+
+    header_fields / row_fields name the model node behind each cell (JSON
+    Pointers); None means the cell is derived and not editable. A row_fields
+    entry may be a (field, role) tuple, e.g. a size-chart row label whose
+    pointer names a dictionary KEY (editing it renames the measurement)."""
     n = max(1, len(headers))
     col_w = width / n
     has_header = any(safe_text(h).strip() for h in headers)
+    header_fields = header_fields or [None] * len(headers)
+    row_fields = row_fields or [[None] * len(row) for row in rows]
     data = []
     if has_header:
-        data.append([_cell(h, bold=True, color=C["white"], align="left" if i == 0 else "center", upper=True, placeholder="&nbsp;")
+        data.append([_cell(h, bold=True, color=C["white"], align="left" if i == 0 else "center", upper=True,
+                           placeholder="&nbsp;", role="header_cell", field=header_fields[i])
                      for i, h in enumerate(headers)])
-    for row in rows:
-        data.append([
-            _cell(row[i] if i < len(row) else "—", align="left" if i == 0 else "center")
-            for i in range(n)
-        ])
+    for r, row in enumerate(rows):
+        cells = []
+        for i in range(n):
+            spec = row_fields[r][i] if i < len(row_fields[r]) else None
+            field, role = spec if isinstance(spec, tuple) else (spec, "cell")
+            cells.append(_cell(row[i] if i < len(row) else "—", align="left" if i == 0 else "center", field=field, role=role))
+        data.append(cells)
     if not data:
         return None
     t = Table(data, colWidths=[col_w] * n, repeatRows=1 if has_header else 0)
@@ -317,26 +377,31 @@ def build_table(headers, rows, width):
     return t
 
 
-def render_table(pen: Pen, title, headers, rows, y, page_title):
+def render_table(pen: Pen, title, headers, rows, y, page_title, *, title_field="/title",
+                 header_fields=None, row_fields=None):
     x = INNER_X + SECTION_PAD
     width = INNER_W - 2 * SECTION_PAD
     if title:
         y = pen.ensure_space(60, y, page_title)
-        pen.text(x, y, title, FONT["sectionTitle"], C["black"], bold=True)
+        with pen.tag("heading", title_field):
+            pen.text(x, y, title, FONT["sectionTitle"], C["black"], bold=True)
         y += 18
-        pen.line(x, y, x + width, y, C["border"], 0.5)
+        with pen.tag("rule"):
+            pen.line(x, y, x + width, y, C["border"], 0.5)
         y += 10
     if not headers:
         return y
-    table = build_table(headers, rows, width)
+    table = build_table(headers, rows, width, header_fields, row_fields)
     if table is None:
         return y
-    y = pen.draw_flowable(table, y, page_title, x=x, width=width)
+    with pen.tag("table"):
+        y = pen.draw_flowable(table, y, page_title, x=x, width=width)
     return y + CELL_PAD
 
 
 def render_size_chart(pen: Pen, b, y, page_title):
     sizes = list(b.sizes)
+    size_fields = [pointer("sizes", i) for i in range(len(sizes))]
     if not sizes:
         seen = []
         for m in b.measurements.values():
@@ -344,11 +409,16 @@ def render_size_chart(pen: Pen, b, y, page_title):
                 if s not in seen:
                     seen.append(s)
         sizes = seen
+        size_fields = [None] * len(sizes)
     headers = ["Measurement", *[s.upper() for s in sizes]]
     rows = []
+    row_fields = []
     for name, by_size in b.measurements.items():
         rows.append([name.replace("_", " "), *[str(by_size.get(s, "—")) for s in sizes]])
-    return render_table(pen, b.title or "Size Chart", headers, rows, y, page_title)
+        row_fields.append([(pointer("measurements", name), "row_label"),
+                           *[pointer("measurements", name, s) if s in by_size else None for s in sizes]])
+    return render_table(pen, b.title or "Size Chart", headers, rows, y, page_title,
+                        header_fields=[None, *size_fields], row_fields=row_fields)
 
 
 def render_image_grid(pen: Pen, b, y, page_title):
@@ -356,25 +426,25 @@ def render_image_grid(pen: Pen, b, y, page_title):
     gap = 15
     cell_w = (INNER_W - (cols + 1) * gap) / cols
     maxh = b.max_height
-    items = [(fetch_image(it.src), it.label) for it in b.images]
+    items = [(index, pen.load_image(it.src), it.label) for index, it in enumerate(b.images)]
     for row in _chunk(items, cols):
-        image_h = max((min(maxh, cell_w * img.height / img.width) if img is not None else maxh for img, _ in row), default=maxh)
+        image_h = max((min(maxh, cell_w * img.height / img.width) if img is not None else maxh for _, img, _ in row), default=maxh)
         captions = []
         caption_h = 0
-        for _, label in row:
-            paragraph = Paragraph(escape(safe_text(label or "")).replace("\n", "<br/>"),
-                                  ParagraphStyle("image-caption", fontName=F_REG, fontSize=FONT["small"],
-                                                 leading=FONT["small"] * 1.3, textColor=C["medGrey"], alignment=1))
+        for _, _, label in row:
+            paragraph = pen.make_paragraph(label or "", FONT["small"], C["medGrey"], align="center")
             _, height = paragraph.wrap(cell_w, INNER_H)
             captions.append((paragraph, height))
             caption_h = max(caption_h, height)
         y = pen.ensure_space(image_h + caption_h + 14, y, page_title)
-        for c, (img, label) in enumerate(row):
+        for c, (index, img, label) in enumerate(row):
             ix = INNER_X + gap + c * (cell_w + gap)
             if img is not None:
-                pen.image(img, ix, y, cell_w, image_h)
+                with pen.tag("image", pointer("images", index, "src")):
+                    pen.image(img, ix, y, cell_w, image_h)
             paragraph, height = captions[c]
-            paragraph.drawOn(pen.c, ix, pen.H - (y + image_h + 4 + height))
+            with pen.tag("caption", pointer("images", index, "label")):
+                pen.place_paragraph(paragraph, ix, y + image_h + 4, height)
         y += image_h + caption_h + 14
     return y
 
@@ -389,24 +459,31 @@ def _draw_cards(pen, items, cols, cell, gap, y, page_title, *, label_size):
         n = len(row)
         row_w = n * cell + (n - 1) * gap
         start_x = INNER_X + max(0, (INNER_W - row_w) / 2)  # center the row
-        for c, (img, label, cap, color) in enumerate(row):
+        for c, (index, img, label, cap, color) in enumerate(row):
             ix = start_x + c * (cell + gap)
+            path = pointer("swatches", index)
             if img is not None:
-                pen.image(img, ix, y, cell, cell)
+                with pen.tag("swatch", path + "/src"):
+                    pen.image(img, ix, y, cell, cell)
             elif color:
                 try:
-                    pen.fill_rect(ix, y, cell, cell, HexColor(color))
+                    with pen.tag("swatch", path + "/color"):
+                        pen.fill_rect(ix, y, cell, cell, HexColor(color))
                 except Exception:
                     pass
-                pen.stroke_rect(ix, y, cell, cell, C["borderGrey"], 0.5)
+                with pen.tag("card_border", path):
+                    pen.stroke_rect(ix, y, cell, cell, C["borderGrey"], 0.5)
             else:
-                pen.stroke_rect(ix, y, cell, cell, C["borderGrey"], 0.5)
+                with pen.tag("card_border", path):
+                    pen.stroke_rect(ix, y, cell, cell, C["borderGrey"], 0.5)
             ly = y + cell + 4
             if label:
-                pen.text(ix, ly, label, label_size, C["black"], bold=True, align="center", width=cell)
+                with pen.tag("label", path + "/label"):
+                    pen.text(ix, ly, label, label_size, C["black"], bold=True, align="center", width=cell)
                 ly += label_size + 3
             if cap:
-                pen.text(ix, ly, cap, FONT["small"], C["medGrey"], align="center", width=cell)
+                with pen.tag("caption", path + "/caption"):
+                    pen.text(ix, ly, cap, FONT["small"], C["medGrey"], align="center", width=cell)
         y += cell + label_block + 8
     return y
 
@@ -416,16 +493,18 @@ def render_swatch_grid(pen: Pen, b, y, page_title):
     # Cards WITH a visual (image swatch/render, or a solid colour chip) render
     # BIG; blank label/packaging cards (no image, no colour) render COMPACT.
     vis_items = [
-        (fetch_image(s.src) if s.src else None, s.label, s.caption, s.color)
-        for s in b.swatches if (s.src or s.color)
+        (index, pen.load_image(s.src) if s.src else None, s.label, s.caption, s.color)
+        for index, s in enumerate(b.swatches) if (s.src or s.color)
     ]
-    blank_items = [(None, s.label, s.caption, None) for s in b.swatches if not (s.src or s.color)]
+    blank_items = [(index, None, s.label, s.caption, None) for index, s in enumerate(b.swatches) if not (s.src or s.color)]
 
     if b.title:
         y = pen.ensure_space(30, y, page_title)
-        pen.text(INNER_X + SECTION_PAD, y, b.title, FONT["sectionTitle"], C["black"], bold=True)
+        with pen.tag("heading", "/title"):
+            pen.text(INNER_X + SECTION_PAD, y, b.title, FONT["sectionTitle"], C["black"], bold=True)
         y += 18
-        pen.line(INNER_X, y, INNER_X + INNER_W, y, C["border"], 0.5)
+        with pen.tag("rule"):
+            pen.line(INNER_X, y, INNER_X + INNER_W, y, C["border"], 0.5)
         y += 10
 
     if vis_items:
@@ -448,14 +527,16 @@ def render_text(pen: Pen, b, y, page_title):
             "body": FONT["body"], "small": FONT["small"]}[b.variant]
     bold = b.variant in ("title", "heading")
     y = pen.ensure_space(size * 2, y, page_title)
-    h = pen.paragraph(INNER_X + SECTION_PAD, y, b.text, INNER_W - 2 * SECTION_PAD,
-                      size, C["black"] if bold else C["darkGrey"], bold=bold)
+    with pen.tag("heading" if bold else b.variant, "/text"):
+        h = pen.paragraph(INNER_X + SECTION_PAD, y, b.text, INNER_W - 2 * SECTION_PAD,
+                          size, C["black"] if bold else C["darkGrey"], bold=bold)
     return y + h + 6
 
 
 def render_divider(pen: Pen, b, y, page_title):
     y = pen.ensure_space(10, y, page_title)
-    pen.line(INNER_X + SECTION_PAD, y, INNER_X + INNER_W - SECTION_PAD, y, C["borderGrey"], 0.5)
+    with pen.tag("divider"):
+        pen.line(INNER_X + SECTION_PAD, y, INNER_X + INNER_W - SECTION_PAD, y, C["borderGrey"], 0.5)
     return y + 8
 
 
@@ -464,32 +545,35 @@ def render_spacer(pen: Pen, b, y, page_title):
 
 
 def render_abs(pen: Pen, b, y, page_title):
-    for el in b.elements:
+    for index, el in enumerate(b.elements):
         color = HexColor(el.color) if el.color else C["darkGrey"]
-        if el.kind == "text":
-            pen.text(el.x, el.y, el.text or "", el.font_size or 9, color, bold=el.bold)
-        elif el.kind == "rect":
-            pen.stroke_rect(el.x, el.y, el.w or 0, el.h or 0, color, 1)
-        elif el.kind == "line":
-            pen.line(el.x, el.y, el.x2 if el.x2 is not None else el.x,
-                     el.y2 if el.y2 is not None else el.y, color, 1)
-        elif el.kind == "image":
-            img = fetch_image(el.src)
-            if img is not None:
-                pen.image(img, el.x, el.y, el.w or 100, el.h or 100)
+        with pen.tag("abs_" + el.kind, pointer("elements", index)):
+            if el.kind == "text":
+                pen.text(el.x, el.y, el.text or "", el.font_size or 9, color, bold=el.bold)
+            elif el.kind == "rect":
+                pen.stroke_rect(el.x, el.y, el.w or 0, el.h or 0, color, 1)
+            elif el.kind == "line":
+                pen.line(el.x, el.y, el.x2 if el.x2 is not None else el.x,
+                         el.y2 if el.y2 is not None else el.y, color, 1)
+            elif el.kind == "image":
+                img = pen.load_image(el.src)
+                if img is not None:
+                    pen.image(img, el.x, el.y, el.w or 100, el.h or 100)
     return y
 
 
 def render_callouts(pen: Pen, b, y, page_title):
     if b.view:
         y = pen.ensure_space(26, y, page_title)
-        pen.text(INNER_X + SECTION_PAD, y, b.view.upper(), FONT["sectionTitle"], C["black"], bold=True)
+        with pen.tag("heading", "/view"):
+            pen.text(INNER_X + SECTION_PAD, y, b.view.upper(), FONT["sectionTitle"], C["black"], bold=True)
         y += 20
 
-    img = fetch_image(b.image)
+    img = pen.load_image(b.image)
     box_w = INNER_W * 0.66          # leave side margins for the circles + leader lines
     box_h = b.max_height
     y = pen.ensure_space(box_h + 16, y, page_title)
+    indices = {id(p): index for index, p in enumerate(b.points)}
 
     if img is not None:
         iw, ih = img.size
@@ -497,7 +581,8 @@ def render_callouts(pen: Pen, b, y, page_title):
         dw, dh = iw * scale, ih * scale
         ix = INNER_X + (INNER_W - dw) / 2
         iy = y
-        pen.image(img, ix, iy, dw, dh)
+        with pen.tag("image", "/image"):
+            pen.image(img, ix, iy, dw, dh)
 
         # Marker colour — Aria picks one that pops against the garment; default red.
         try:
@@ -518,10 +603,15 @@ def render_callouts(pen: Pen, b, y, page_title):
                 last_available = iy + dh - (len(side_points) - index - 1) * effective_spacing
                 cy = min(max(fy, prev_cy + effective_spacing), last_available)
                 prev_cy = cy
-                pen.line(circle_x, cy, fx, fy, accent, 1.0)           # leader line
-                pen.circle(fx, fy, 2.2, fill=accent)                  # dot on the feature
-                pen.circle(circle_x, cy, r, fill=C["white"], stroke=accent, lw=1.4)
-                pen.text(circle_x - r, cy - 3.0, str(p.n), 8, accent, bold=True, align="center", width=2 * r)
+                path = pointer("points", indices[id(p)])
+                with pen.tag("leader", path, n=p.n):
+                    pen.line(circle_x, cy, fx, fy, accent, 1.0)           # leader line
+                with pen.tag("dot", path, n=p.n):
+                    pen.circle(fx, fy, 2.2, fill=accent)                  # dot on the feature
+                with pen.tag("marker", path, n=p.n):
+                    pen.circle(circle_x, cy, r, fill=C["white"], stroke=accent, lw=1.4)
+                with pen.tag("marker_number", path + "/n", n=p.n):
+                    pen.text(circle_x - r, cy - 3.0, str(p.n), 8, accent, bold=True, align="center", width=2 * r)
 
         left = sorted([p for p in b.points if p.x < 0.5], key=lambda p: p.y)
         right = sorted([p for p in b.points if p.x >= 0.5], key=lambda p: p.y)
@@ -529,19 +619,26 @@ def render_callouts(pen: Pen, b, y, page_title):
         place(right, INNER_X + INNER_W - 16)
         y = iy + dh + 14
     else:
-        pen.stroke_rect(INNER_X, y, box_w, box_h, C["borderGrey"], 0.5)
+        with pen.tag("image_placeholder", "/image"):
+            pen.stroke_rect(INNER_X, y, box_w, box_h, C["borderGrey"], 0.5)
         y += box_h + 14
 
     if b.points:
-        rows = [[str(p.n), (p.label or "").upper()] for p in sorted(b.points, key=lambda p: p.n)]
-        y = render_table(pen, "CALLOUTS", ["#", "DETAIL"], rows, y, page_title)
+        ordered = sorted(b.points, key=lambda p: p.n)
+        rows = [[str(p.n), (p.label or "").upper()] for p in ordered]
+        row_fields = [[pointer("points", indices[id(p)], "n"), pointer("points", indices[id(p)], "label")] for p in ordered]
+        y = render_table(pen, "CALLOUTS", ["#", "DETAIL"], rows, y, page_title,
+                         title_field=None, header_fields=[None, None], row_fields=row_fields)
     return y
 
 
 _DISPATCH = {
     "header": render_header,
     "spec_section": render_spec_section,
-    "table": lambda pen, b, y, t: render_table(pen, b.title, b.headers, b.rows, y, t),
+    "table": lambda pen, b, y, t: render_table(
+        pen, b.title, b.headers, b.rows, y, t,
+        header_fields=[pointer("headers", i) for i in range(len(b.headers))],
+        row_fields=[[pointer("rows", r, c) for c in range(len(row))] for r, row in enumerate(b.rows)]),
     "size_chart": render_size_chart,
     "image_grid": render_image_grid,
     "swatch_grid": render_swatch_grid,
@@ -553,21 +650,28 @@ _DISPATCH = {
 }
 
 
+def draw_document(pen: Pen, document: Document):
+    """Walk the document through any Pen. Pages and blocks without ids get
+    positional ones so layout bindings are always addressable."""
+    pages = document.pages or [None]
+    for page_index, page in enumerate(pages):
+        title = page.title if page else ""
+        page_id = page.id if page and page.id else f"page-{page_index + 1}"
+        y = pen.new_page(title, page_id=page_id)
+        if page:
+            for block_index, block in enumerate(page.blocks):
+                renderer = _DISPATCH.get(block.type)
+                if renderer:
+                    with pen.block(block.id or f"{page_id}-block-{block_index + 1}", block.type):
+                        y = renderer(pen, block, y, title)
+
+
 def render_pdf(document: Document) -> bytes:
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=(PAGE_W, PAGE_H))
     c.setTitle(safe_text(document.title))
     c.setAuthor(safe_text(document.author))
     pen = Pen(c)
-
-    pages = document.pages or [None]
-    for page in pages:
-        title = page.title if page else ""
-        y = pen.new_page(title)
-        if page:
-            for block in page.blocks:
-                renderer = _DISPATCH.get(block.type)
-                if renderer:
-                    y = renderer(pen, block, y, title)
+    draw_document(pen, document)
     pen.finalize()
     return buf.getvalue()
