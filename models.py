@@ -201,3 +201,12 @@ class RasterRequest(BaseModel):
     page: int = 1                   # 1-based page number to rasterize
     scale: float = 2.0              # render scale for the PNG
     all_pages: bool = False         # fmt=json only: also return every page in one response
+
+
+class LayoutRequest(BaseModel):
+    """Model-bound canvas geometry (see layout.py). No images are fetched:
+    pass the pixel size of every remote image the document references."""
+    document: Document
+    mode: Literal["pages", "sheet"] = "pages"
+    chrome: bool = True                                   # pages mode: border, top bar, footer
+    image_sizes: dict[str, tuple[float, float]] = Field(default_factory=dict)   # src -> (width, height)

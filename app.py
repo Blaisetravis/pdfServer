@@ -10,6 +10,7 @@ Endpoints:
   POST /api/pdf/render   -> application/pdf            (body: {document})
   POST /api/pdf/raster   -> image/png                  (body: {document, page, scale})
        ?fmt=json&all_pages -> {page_count, png_base64, pages:[{page, png_base64}]}
+  POST /api/pdf/layout   -> model-bound canvas geometry (body: {document, mode, chrome, image_sizes})
 
 Optional auth: set PDFSERVER_API_KEY to require `Authorization: Bearer <key>`.
 """
@@ -20,8 +21,9 @@ import os
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, Response
 
-from models import RasterRequest, RenderRequest, CalloutsBlock
+from models import LayoutRequest, RasterRequest, RenderRequest, CalloutsBlock
 from callout_layout import layout_callouts
+from layout import layout_document
 from raster import page_count, render_all_pages_png, render_page_png
 from render import render_pdf
 from canvas_export import CanvasExportRequest, render_canvas_pdf
@@ -50,6 +52,23 @@ def callouts_layout(req: CalloutsBlock, authorization: str | None = Header(defau
     try:
         return layout_callouts(req)
     except (ValueError, OSError) as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@app.post("/api/pdf/layout")
+def layout(req: LayoutRequest, authorization: str | None = Header(default=None)):
+    """Editable canvas geometry for the document, produced by the same block
+    renderers as /render. Every element carries a `binding` naming the block,
+    page, role and JSON Pointer field it represents."""
+    _check_auth(authorization)
+    if len(req.document.pages) > 50 or sum(len(p.blocks) for p in req.document.pages) > 2000:
+        raise HTTPException(status_code=413, detail="Document too large for one layout request")
+    for size in req.image_sizes.values():
+        if not all(0 < v <= 20000 for v in size):
+            raise HTTPException(status_code=422, detail="Invalid image size")
+    try:
+        return layout_document(req.document, mode=req.mode, image_sizes=req.image_sizes, chrome=req.chrome)
+    except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 

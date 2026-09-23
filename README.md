@@ -27,6 +27,8 @@ uvicorn app:app --reload --port 8080
 | GET  | `/health` | — | `{ok, service, version}` |
 | POST | `/api/pdf/render` | `{document}` | `application/pdf` (+ `X-Page-Count`) |
 | POST | `/api/pdf/raster?fmt=png\|json` | `{document, page, scale}` | `image/png`, or `{png_base64, page, page_count}` |
+| POST | `/api/pdf/layout` | `{document, mode, chrome, image_sizes}` | model-bound canvas geometry (below) |
+| POST | `/api/pdf/callouts/layout` | `CalloutsBlock` | legacy flat callout sheet geometry |
 
 Optional auth: set `PDFSERVER_API_KEY` to require `Authorization: Bearer <key>`.
 
@@ -47,11 +49,52 @@ Unicode fractions (⅜⅝⅞ …) and sub/superscripts to ASCII — ReportLab's 
 fonts render those as solid black boxes otherwise. Eighth-fractions are routine
 in tech-pack measurements, so this matters.
 
+## Layout endpoint (canvas ⇄ PDF from one code path)
+`POST /api/pdf/layout` runs the same block renderers as `/render` with a
+recording pen (`layout.py`) and returns editable canvas elements instead of a
+PDF. Every element carries a `binding`:
+
+```json
+{"type": "text", "x": 52, "y": 118, "text": "26 3/8", "fontSize": 7, "page": 2,
+ "binding": {"blockId": "b_sizes", "blockType": "size_chart", "pageId": "p_specs",
+             "role": "cell", "field": "/measurements/Body Length/M"}}
+```
+
+- `field` is a JSON Pointer (RFC 6901) into the block; `null` means the element
+  is derived (grid line, fixed heading) and not directly editable. Role
+  `row_label` is the one pointer that names a dictionary KEY (a size-chart
+  measurement name): editing it renames the key rather than setting a value.
+- Roles: page chrome `page_border page_bar page_brand page_title page_footer`;
+  text `heading label value body bullet small caption cell header_cell
+  row_label marker_number abs_text`; structure `rule divider grid_border grid_divider
+  table_box cell_bg cell_border header_cell_bg header_cell_border card_border`;
+  media `image image_placeholder swatch abs_image abs_rect abs_line`; callouts
+  `leader dot marker` (each also carries `n`).
+- `mode: "pages"` (default) returns `pages[]` of Letter frames with real
+  pagination, identical to the PDF; `chrome: false` drops the border/bar/footer
+  but keeps the same content geometry. `mode: "sheet"` lays everything on one
+  infinite sheet with no page breaks, for single-block relayout.
+- `blocks[]` gives each block's bounding box per page it touches.
+- **No images are fetched.** Send `image_sizes: {src: [w, h]}` for remote
+  images; embedded data URLs are measured locally; unknown remote images get a
+  square slot flagged `sizeUnknown: true`.
+
+Element types match the canvas client: `rectangle ellipse line text image`,
+with `strokeColor / backgroundColor / strokeWidth`, relative `points` for lines,
+and one text element per paragraph or table cell (`lineHeight` is a ratio).
+Tables are emitted from the platypus table's own measured rows, column widths
+and style commands, so split tables, header repeats and zebra rows match the PDF.
+
+Run `python test_layout.py` after touching `render.py` or `layout.py`.
+
 ## Files
 - `app.py` — FastAPI service
 - `models.py` — the document model (pydantic) = the AgentServer⇄PdfServer contract
 - `render.py` — model → PDF (ReportLab; `Pen` = top-down coord wrapper)
 - `raster.py` — PDF → PNG (pypdfium2)
+- `layout.py` — recording pen: model → tagged canvas geometry (`/api/pdf/layout`)
+- `callout_layout.py` — legacy flat callout geometry, built on `layout.py`
+- `test_fixtures.py` — all-block fixture documents; `test_layout.py` — layout tests
 - `style.py` — house style (ported from AgentServer `pdf/layout.js`) + `safe_text`
 - `test_render.py` — smoke test
 
