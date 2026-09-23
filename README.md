@@ -82,6 +82,9 @@ PDF. Every element carries a `binding`:
 Element types match the canvas client: `rectangle ellipse line text image`,
 with `strokeColor / backgroundColor / strokeWidth`, relative `points` for lines,
 and one text element per paragraph or table cell (`lineHeight` is a ratio).
+Text `x` is always the left edge of the text as drawn, already resolved for
+center/right alignment with the PDF's font metrics; `width` is the widest line
+and `boxWidth` the box it was aligned in. Clients place text at `x` as-is.
 Tables are emitted from the platypus table's own measured rows, column widths
 and style commands, so split tables, header repeats and zebra rows match the PDF.
 

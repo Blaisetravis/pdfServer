@@ -17,6 +17,7 @@ Optional auth: set PDFSERVER_API_KEY to require `Authorization: Bearer <key>`.
 
 import base64
 import os
+from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, Response
@@ -33,7 +34,7 @@ app = FastAPI(title="PdfServer", version="0.1.0")
 API_KEY = os.environ.get("PDFSERVER_API_KEY", "").strip()
 
 
-def _check_auth(authorization: str | None):
+def _check_auth(authorization: Optional[str]):
     if not API_KEY:
         return  # auth disabled
     expected = f"Bearer {API_KEY}"
@@ -47,7 +48,7 @@ def health():
 
 
 @app.post("/api/pdf/callouts/layout")
-def callouts_layout(req: CalloutsBlock, authorization: str | None = Header(default=None)):
+def callouts_layout(req: CalloutsBlock, authorization: Optional[str] = Header(default=None)):
     _check_auth(authorization)
     try:
         return layout_callouts(req)
@@ -56,7 +57,7 @@ def callouts_layout(req: CalloutsBlock, authorization: str | None = Header(defau
 
 
 @app.post("/api/pdf/layout")
-def layout(req: LayoutRequest, authorization: str | None = Header(default=None)):
+def layout(req: LayoutRequest, authorization: Optional[str] = Header(default=None)):
     """Editable canvas geometry for the document, produced by the same block
     renderers as /render. Every element carries a `binding` naming the block,
     page, role and JSON Pointer field it represents."""
@@ -73,7 +74,7 @@ def layout(req: LayoutRequest, authorization: str | None = Header(default=None))
 
 
 @app.post("/api/pdf/render")
-def render(req: RenderRequest, authorization: str | None = Header(default=None)):
+def render(req: RenderRequest, authorization: Optional[str] = Header(default=None)):
     _check_auth(authorization)
     pdf = render_pdf(req.document)
     return Response(
@@ -87,7 +88,7 @@ def render(req: RenderRequest, authorization: str | None = Header(default=None))
 
 
 @app.post("/api/pdf/canvas")
-def canvas_export(req: CanvasExportRequest, authorization: str | None = Header(default=None)):
+def canvas_export(req: CanvasExportRequest, authorization: Optional[str] = Header(default=None)):
     _check_auth(authorization)
     try:
         pdf = render_canvas_pdf(req)
@@ -99,7 +100,7 @@ def canvas_export(req: CanvasExportRequest, authorization: str | None = Header(d
 
 
 @app.post("/api/pdf/raster")
-def raster(req: RasterRequest, authorization: str | None = Header(default=None),
+def raster(req: RasterRequest, authorization: Optional[str] = Header(default=None),
            fmt: str = "png"):
     """Render the model and return the requested page as a PNG.
 

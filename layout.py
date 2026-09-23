@@ -153,11 +153,20 @@ class LayoutPen(Pen):
         if not text.strip():
             return
         style = p.style
-        width = max(p.width, max((self.string_width(line, style.fontSize, "Bold" in style.fontName) for line in lines), default=0))
-        self._emit(dict(type="text", x=x, y=y_top, width=width, height=h, text=text, fontSize=style.fontSize,
-                        lineHeight=style.leading / style.fontSize, textAlign=("left", "center", "right", "left")[style.alignment],
-                        bold="Bold" in style.fontName, strokeColor=color(style.textColor)),
-                   (x, y_top, x + width, y_top + h))
+        bold = "Bold" in style.fontName
+        align = ("left", "center", "right", "left")[style.alignment]
+        widest = max((self.string_width(line, style.fontSize, bold) for line in lines), default=0)
+        # Resolve alignment here with the PDF's own metrics: the element's x is
+        # its left edge, its width is the widest line, and textAlign only
+        # centers shorter lines within that width. Clients never re-measure.
+        if align == "center":
+            x += (p.width - widest) / 2
+        elif align == "right":
+            x += p.width - widest
+        self._emit(dict(type="text", x=x, y=y_top, width=widest, height=h, text=text, fontSize=style.fontSize,
+                        lineHeight=style.leading / style.fontSize, textAlign=align, boxWidth=p.width,
+                        bold=bold, strokeColor=color(style.textColor)),
+                   (x, y_top, x + widest, y_top + h))
 
     def image(self, img, x, y_top, w, h):
         # Same fit as drawImage(preserveAspectRatio=True, anchor="c").
