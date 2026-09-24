@@ -45,7 +45,32 @@ def pointer(*parts) -> str:
 
 # --- image fetch ------------------------------------------------------------
 
+#PHOTOS ARE EMBEDDED AS BOUNDED JPEGS. A LETTER PAGE NEVER NEEDS MORE THAN ~2200PX ON A SIDE, AND//
+#REPORTLAB PASSES A JPEG STREAM THROUGH UNCHANGED, SO A 20 MB PACK OF LOSSLESS PNG PHOTOS BECOMES//
+#A FEW MB WITH NO VISIBLE DIFFERENCE AT PRINT SIZE.//
+EMBED_MAX_SIDE = 2200
+EMBED_JPEG_QUALITY = 86
+
+
+def prepare_for_embed(img: Image.Image) -> Image.Image:
+    if max(img.size) > EMBED_MAX_SIDE:
+        img = img.copy()
+        img.thumbnail((EMBED_MAX_SIDE, EMBED_MAX_SIDE), Image.LANCZOS)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    buffer = BytesIO()
+    img.save(buffer, "JPEG", quality=EMBED_JPEG_QUALITY, optimize=True, progressive=False)
+    buffer.seek(0)
+    img.embed_stream = buffer
+    return img
+
+
 def fetch_image(src: str) -> Optional[Image.Image]:
+    img = _load_image(src)
+    return prepare_for_embed(img) if img is not None else None
+
+
+def _load_image(src: str) -> Optional[Image.Image]:
     # Canvas artwork is embedded so an export needs no temporary public upload.
     if isinstance(src, str) and src.startswith("data:image/"):
         header, encoded = src.split(",", 1)
@@ -144,8 +169,11 @@ class Pen:
 
     def image(self, img, x, y_top, w, h):
         try:
+            stream = getattr(img, "embed_stream", None)
+            if stream is not None:
+                stream.seek(0)
             self.c.drawImage(
-                ImageReader(img), x, self.H - (y_top + h),
+                ImageReader(stream if stream is not None else img), x, self.H - (y_top + h),
                 width=w, height=h, preserveAspectRatio=True, anchor="c", mask="auto",
             )
         except Exception as e:
