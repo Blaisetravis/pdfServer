@@ -22,12 +22,10 @@ from typing import Optional
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, Response
 
-from models import LayoutRequest, RasterRequest, RenderRequest, CalloutsBlock
-from callout_layout import layout_callouts
+from models import LayoutRequest, RasterRequest, RenderRequest
 from layout import layout_document
 from raster import page_count, render_all_pages_png, render_page_png
 from render import render_pdf
-from canvas_export import CanvasExportRequest, render_canvas_pdf
 
 app = FastAPI(title="PdfServer", version="0.1.0")
 
@@ -45,15 +43,6 @@ def _check_auth(authorization: Optional[str]):
 @app.get("/health")
 def health():
     return {"ok": True, "service": "pdfServer", "version": "0.1.0"}
-
-
-@app.post("/api/pdf/callouts/layout")
-def callouts_layout(req: CalloutsBlock, authorization: Optional[str] = Header(default=None)):
-    _check_auth(authorization)
-    try:
-        return layout_callouts(req)
-    except (ValueError, OSError) as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.post("/api/pdf/layout")
@@ -85,18 +74,6 @@ def render(req: RenderRequest, authorization: Optional[str] = Header(default=Non
             "Content-Disposition": 'inline; filename="techpack.pdf"',
         },
     )
-
-
-@app.post("/api/pdf/canvas")
-def canvas_export(req: CanvasExportRequest, authorization: Optional[str] = Header(default=None)):
-    _check_auth(authorization)
-    try:
-        pdf = render_canvas_pdf(req)
-    except (ValueError, OSError) as error:
-        raise HTTPException(status_code=422, detail="Invalid canvas content") from error
-    return Response(content=pdf, media_type="application/pdf",
-                    headers={"X-Page-Count": str(len(req.pages)),
-                             "Content-Disposition": 'attachment; filename="techpack.pdf"'})
 
 
 @app.post("/api/pdf/raster")

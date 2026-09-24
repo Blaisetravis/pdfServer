@@ -6,17 +6,14 @@ Proves /api/pdf/layout is the PDF renderer wearing a recording pen:
     JSON Pointer whose target holds that value,
   * nothing is emitted without a role,
   * sheet mode has no page chrome,
-  * the legacy callouts contract is unchanged.
 """
 import json
 
-from models import CalloutPoint, CalloutsBlock
-from callout_layout import layout_callouts
 from layout import layout_document
 from raster import page_count
 from render import render_pdf
 from style import PAGE_H, PAGE_W, safe_text
-from test_fixtures import GARMENT, full_document
+from test_fixtures import full_document
 
 CHROME = {"page_border", "page_bar", "page_brand", "page_title", "page_footer"}
 EDITABLE_TEXT = {"label", "value", "heading", "body", "bullet", "small", "cell", "header_cell", "caption", "marker_number", "abs_text", "row_label"}
@@ -129,17 +126,6 @@ def test_remote_image_sizes():
     check("sizeUnknown" not in image and abs(image["width"] / image["height"] - 2) < 0.01, "image size not honoured")
 
 
-def test_legacy_callouts():
-    block = CalloutsBlock(image=GARMENT, points=[CalloutPoint(n=1, x=.5, y=.1, label="Neck"), CalloutPoint(n=2, x=.2, y=.6, label="Hem")], max_height=300)
-    result = layout_callouts(block)
-    check(result["width"] == 612 and result["height"] > 300, "legacy callout sheet size")
-    allowed = {"type", "x", "y", "width", "height", "points", "text", "fontSize", "strokeColor", "backgroundColor", "strokeWidth"}
-    for element in result["elements"]:
-        check(set(element) <= allowed, f"legacy element leaked keys {set(element) - allowed}")
-        check("src" not in element, "legacy image echoed the garment")
-    check(sum(e["type"] == "image" for e in result["elements"]) == 1, "legacy layout needs exactly one image slot")
-
-
 def main():
     doc = full_document()
     result = layout_document(doc, mode="pages")
@@ -150,7 +136,6 @@ def main():
     test_sheet_mode(doc)
     test_no_chrome(doc)
     test_remote_image_sizes()
-    test_legacy_callouts()
     total = sum(len(p["elements"]) for p in result["pages"])
     print(f"layout ok: {result['pageCount']} pages, {total} elements, {bound} bound text values, {len(result['blocks'])} block boxes")
 

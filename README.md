@@ -28,7 +28,6 @@ uvicorn app:app --reload --port 8080
 | POST | `/api/pdf/render` | `{document}` | `application/pdf` (+ `X-Page-Count`) |
 | POST | `/api/pdf/raster?fmt=png\|json` | `{document, page, scale}` | `image/png`, or `{png_base64, page, page_count}` |
 | POST | `/api/pdf/layout` | `{document, mode, chrome, image_sizes}` | model-bound canvas geometry (below) |
-| POST | `/api/pdf/callouts/layout` | `CalloutsBlock` | legacy flat callout sheet geometry |
 
 Optional auth: set `PDFSERVER_API_KEY` to require `Authorization: Bearer <key>`.
 
@@ -96,7 +95,6 @@ Run `python test_layout.py` after touching `render.py` or `layout.py`.
 - `render.py` — model → PDF (ReportLab; `Pen` = top-down coord wrapper)
 - `raster.py` — PDF → PNG (pypdfium2)
 - `layout.py` — recording pen: model → tagged canvas geometry (`/api/pdf/layout`)
-- `callout_layout.py` — legacy flat callout geometry, built on `layout.py`
 - `test_fixtures.py` — all-block fixture documents; `test_layout.py` — layout tests
 - `style.py` — house style (ported from AgentServer `pdf/layout.js`) + `safe_text`
 - `test_render.py` — smoke test
@@ -118,3 +116,4 @@ set the same value on AgentServer so it sends `Authorization: Bearer <key>`.
 - TODO: footer page totals ("N / M"), platypus-based cell wrapping for long
   table values, image-grid overflow paging polish, A4 page size, request
   validation limits.
+

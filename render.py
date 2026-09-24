@@ -350,7 +350,7 @@ def _cell(text, *, bold=False, color=None, align="left", upper=False, placeholde
     return p
 
 
-def build_table(headers, rows, width, header_fields=None, row_fields=None):
+def build_table(headers, rows, width, header_fields=None, row_fields=None, col_widths=None):
     """A platypus Table styled to match the house look — dark header, alternating
     rows, thin grid. Cells are Paragraphs so long values WRAP instead of clipping,
     and the header repeats when the table splits across pages.
@@ -382,7 +382,15 @@ def build_table(headers, rows, width, header_fields=None, row_fields=None):
         data.append(cells)
     if not data:
         return None
-    t = Table(data, colWidths=[col_w] * n, repeatRows=1 if has_header else 0)
+    #col_widths: OPTIONAL FIXED WIDTHS PER COLUMN; None ENTRIES SHARE WHATEVER WIDTH IS LEFT//
+    if col_widths and len(col_widths) == n:
+        fixed = sum(w for w in col_widths if w)
+        flexible = [w for w in col_widths if not w]
+        share = max(0.0, width - fixed) / max(1, len(flexible))
+        widths = [w if w else share for w in col_widths]
+    else:
+        widths = [col_w] * n
+    t = Table(data, colWidths=widths, repeatRows=1 if has_header else 0)
     style = [
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 5),
@@ -406,7 +414,7 @@ def build_table(headers, rows, width, header_fields=None, row_fields=None):
 
 
 def render_table(pen: Pen, title, headers, rows, y, page_title, *, title_field="/title",
-                 header_fields=None, row_fields=None):
+                 header_fields=None, row_fields=None, col_widths=None):
     x = INNER_X + SECTION_PAD
     width = INNER_W - 2 * SECTION_PAD
     if title:
@@ -419,7 +427,7 @@ def render_table(pen: Pen, title, headers, rows, y, page_title, *, title_field="
         y += 10
     if not headers:
         return y
-    table = build_table(headers, rows, width, header_fields, row_fields)
+    table = build_table(headers, rows, width, header_fields, row_fields, col_widths)
     if table is None:
         return y
     with pen.tag("table"):
@@ -591,8 +599,10 @@ def render_abs(pen: Pen, b, y, page_title):
 
 
 def render_callouts(pen: Pen, b, y, page_title):
+    # The view heading and the garment move together: reserve room for both
+    # before drawing the heading, so it never sits alone at a page bottom.
+    y = pen.ensure_space(b.max_height + 16 + (20 if b.view else 0), y, page_title)
     if b.view:
-        y = pen.ensure_space(26, y, page_title)
         with pen.tag("heading", "/view"):
             pen.text(INNER_X + SECTION_PAD, y, b.view.upper(), FONT["sectionTitle"], C["black"], bold=True)
         y += 20
@@ -656,7 +666,8 @@ def render_callouts(pen: Pen, b, y, page_title):
         rows = [[str(p.n), (p.label or "").upper()] for p in ordered]
         row_fields = [[pointer("points", indices[id(p)], "n"), pointer("points", indices[id(p)], "label")] for p in ordered]
         y = render_table(pen, "CALLOUTS", ["#", "DETAIL"], rows, y, page_title,
-                         title_field=None, header_fields=[None, None], row_fields=row_fields)
+                         title_field=None, header_fields=[None, None], row_fields=row_fields,
+                         col_widths=[40, None])
     return y
 
 
