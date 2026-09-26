@@ -12,6 +12,8 @@ No state is held here. One request in (a full `Document`), bytes out.
 - **pypdfium2** (PDFium, Apache/BSD) — PDF→PNG raster. *Deliberately not PyMuPDF
   (AGPL).*
 - **Pillow** (HPND), **FastAPI/uvicorn/pydantic**, **requests**
+- **Noto Sans** fonts (SIL OFL 1.1, license in each `fonts/<Family>/OFL.txt`) —
+  bundled for translated documents; embedding in generated PDFs is allowed
 
 ## Run locally
 ```bash
@@ -89,6 +91,26 @@ and style commands, so split tables, header repeats and zebra rows match the PDF
 
 Run `python test_layout.py` after touching `render.py` or `layout.py`.
 
+## Languages (`lang`)
+Every POST takes an optional `lang`. Helvetica only has Western European letters,
+so for scripts it lacks, `lang` switches measuring and drawing to a bundled Noto
+family (see `LANGUAGE_FONTS` in `style.py`); Chinese and Japanese also break lines
+between any two characters. No `lang`, or a language Helvetica covers (`es`, `fr`…),
+keeps Helvetica, so existing output is unchanged. `/layout` echoes the measuring
+`font`; callers must reject a translated layout that was not measured with Noto.
+
+| lang | family | file |
+|---|---|---|
+| `zh-Hans` | NotoSansSC | `fonts/NotoSansSC/NotoSansSC-{Regular,Bold}.ttf` |
+| `zh-Hant` | NotoSansTC | `fonts/NotoSansTC/…` |
+| `ja` | NotoSansJP | `fonts/NotoSansJP/…` |
+| `ko` | NotoSansKR | `fonts/NotoSansKR/…` |
+| `vi`, `tr` | NotoSans | `fonts/NotoSans/…` |
+
+Only the static Regular and Bold TTFs are used (ReportLab cannot read variable
+fonts). A missing family returns 422 for that language only. Fonts are registered
+the first time a request needs them. Run `python test_languages.py`.
+
 ## Files
 - `app.py` — FastAPI service
 - `models.py` — the document model (pydantic) = the AgentServer⇄PdfServer contract
@@ -98,6 +120,8 @@ Run `python test_layout.py` after touching `render.py` or `layout.py`.
 - `test_fixtures.py` — all-block fixture documents; `test_layout.py` — layout tests
 - `style.py` — house style (ported from AgentServer `pdf/layout.js`) + `safe_text`
 - `test_render.py` — smoke test
+- `test_languages.py` — `lang` font tests (Chinese layout fits, PDF embeds Noto)
+- `fonts/` — bundled Noto families for `lang`
 
 ## Deploy (Render)
 A `render.yaml` blueprint is included. **New → Blueprint → pick this repo**, or set up a

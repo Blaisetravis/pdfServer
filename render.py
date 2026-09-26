@@ -30,7 +30,7 @@ from xml.sax.saxutils import escape
 from models import Document
 from style import (
     PAGE_W, PAGE_H, MARGIN, CONTENT_W, INNER_X, INNER_Y, INNER_W, INNER_H,
-    COLORS, FONT, F_REG, F_BOLD, CELL_PAD, SECTION_PAD, safe_text,
+    COLORS, FONT, CELL_PAD, SECTION_PAD, safe_text, font_name, word_wrap,
 )
 
 C = COLORS  # shorthand
@@ -137,11 +137,11 @@ class Pen:
         self.c.line(x1, self.H - y1_top, x2, self.H - y2_top)
 
     def string_width(self, s, size, bold=False):
-        return stringWidth(safe_text(s), F_BOLD if bold else F_REG, size)
+        return stringWidth(safe_text(s), font_name(bold), size)
 
     def text(self, x, y_top, s, size, color, bold=False, align="left", width=None):
         s = safe_text(s)
-        font = F_BOLD if bold else F_REG
+        font = font_name(bold)
         self.c.setFont(font, size)
         self.c.setFillColor(color)
         tx = x
@@ -152,8 +152,8 @@ class Pen:
 
     def make_paragraph(self, s, size, color, bold=False, leading=None, align="left"):
         style = ParagraphStyle(
-            "p", fontName=F_BOLD if bold else F_REG, fontSize=size, textColor=color,
-            leading=leading or size * 1.3, alignment=_ALIGN[align],
+            "p", fontName=font_name(bold), fontSize=size, textColor=color,
+            leading=leading or size * 1.3, alignment=_ALIGN[align], wordWrap=word_wrap(),
         )
         return Paragraph(escape(safe_text(s)).replace("\n", "<br/>"), style)
 
@@ -340,9 +340,9 @@ def _cell(text, *, bold=False, color=None, align="left", upper=False, placeholde
     if upper:
         s = s.upper()
     style = ParagraphStyle(
-        "cell", fontName=F_BOLD if bold else F_REG, fontSize=FONT["small"],
+        "cell", fontName=font_name(bold), fontSize=FONT["small"],
         textColor=color or C["darkGrey"], leading=FONT["small"] * 1.25,
-        alignment=_ALIGN[align],
+        alignment=_ALIGN[align], wordWrap=word_wrap(),
     )
     p = Paragraph(escape(s) or placeholder, style)
     # Split tables keep their Paragraph objects, so the binding rides on the cell.

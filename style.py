@@ -11,7 +11,14 @@ constants below in the original TOP-DOWN convention and flip to ReportLab space
 inside the Pen helper (render.py). That keeps these numbers identical to the JS.
 """
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+from pathlib import Path
+from threading import Lock
+
 from reportlab.lib.colors import HexColor
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 # --- Page geometry (Letter, points) ---
 PAGE_W = 612.0
@@ -54,6 +61,68 @@ FONT = {
 # ReportLab built-in font names (Helvetica family — glyph-safe for WinAnsi)
 F_REG = "Helvetica"
 F_BOLD = "Helvetica-Bold"
+
+
+# --- Language fonts -----------------------------------------------------------
+#HELVETICA ONLY HAS WESTERN EUROPEAN LETTERS. A REQUEST WITH A lang THAT NEEDS MORE//
+#(TRANSLATED SHARE LINKS) MEASURES AND DRAWS WITH A BUNDLED NOTO FAMILY INSTEAD.//
+#FILES: fonts/<Family>/<Family>-Regular.ttf + -Bold.ttf (STATIC TTF; SIL OFL, SEE OFL.txt).//
+#EACH FAMILY IS REGISTERED THE FIRST TIME A REQUEST NEEDS IT, SO UNUSED ONES COST NO MEMORY.//
+
+FONTS_DIR = Path(__file__).resolve().parent / "fonts"
+
+# lang -> (family, break lines between any two characters: languages written without spaces)
+LANGUAGE_FONTS = {
+    "zh-Hans": ("NotoSansSC", True),
+    "zh-Hant": ("NotoSansTC", True),
+    "ja": ("NotoSansJP", True),
+    "ko": ("NotoSansKR", False),
+    "vi": ("NotoSans", False),
+    "tr": ("NotoSans", False),
+}
+
+_active_fonts = ContextVar("pdf_fonts", default=(F_REG, F_BOLD, False))
+_registered = set()
+_register_lock = Lock()
+
+
+def _register_family(family):
+    with _register_lock:
+        if family in _registered:
+            return
+        for weight, name in (("Regular", family), ("Bold", f"{family}-Bold")):
+            path = FONTS_DIR / family / f"{family}-{weight}.ttf"
+            if not path.is_file():
+                raise ValueError(f"The {family} font is not installed on this server")
+            pdfmetrics.registerFont(TTFont(name, str(path)))
+        _registered.add(family)
+
+
+def font_name(bold=False):
+    """The font for this request: Helvetica unless use_language() picked a Noto family."""
+    regular, bold_name, _ = _active_fonts.get()
+    return bold_name if bold else regular
+
+
+def word_wrap():
+    """ParagraphStyle.wordWrap for this request: 'CJK' lets lines break without spaces."""
+    return "CJK" if _active_fonts.get()[2] else None
+
+
+@contextmanager
+def use_language(lang):
+    """Measure and draw everything inside with the fonts for `lang`. None, and every
+    language Helvetica covers, keep Helvetica, so English output never changes."""
+    if not lang or lang not in LANGUAGE_FONTS:
+        yield
+        return
+    family, cjk = LANGUAGE_FONTS[lang]
+    _register_family(family)
+    token = _active_fonts.set((family, f"{family}-Bold", cjk))
+    try:
+        yield
+    finally:
+        _active_fonts.reset(token)
 
 # --- Spacing ---
 CELL_PAD = 6.0

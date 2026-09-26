@@ -12,6 +12,9 @@ Endpoints:
        ?fmt=json&all_pages -> {page_count, png_base64, pages:[{page, png_base64}]}
   POST /api/pdf/layout   -> model-bound canvas geometry (body: {document, mode, chrome, image_sizes})
 
+Every POST also takes an optional `lang` (e.g. "zh-Hans") that switches to the bundled
+Noto font for scripts Helvetica lacks. Without it, output is exactly as before.
+
 Optional auth: set PDFSERVER_API_KEY to require `Authorization: Bearer <key>`.
 """
 
@@ -26,6 +29,7 @@ from models import LayoutRequest, RasterRequest, RenderRequest
 from layout import layout_document
 from raster import page_count, render_all_pages_png, render_page_png
 from render import render_pdf
+from style import font_name, use_language
 
 app = FastAPI(title="PdfServer", version="0.1.0")
 
@@ -38,6 +42,14 @@ def _check_auth(authorization: Optional[str]):
     expected = f"Bearer {API_KEY}"
     if authorization != expected:
         raise HTTPException(status_code=401, detail="invalid or missing API key")
+
+
+def _render_for(req):
+    try:
+        with use_language(req.lang):
+            return render_pdf(req.document)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
 
 
 @app.get("/health")
@@ -57,7 +69,11 @@ def layout(req: LayoutRequest, authorization: Optional[str] = Header(default=Non
         if not all(0 < v <= 20000 for v in size):
             raise HTTPException(status_code=422, detail="Invalid image size")
     try:
-        return layout_document(req.document, mode=req.mode, image_sizes=req.image_sizes, chrome=req.chrome)
+        with use_language(req.lang):
+            result = layout_document(req.document, mode=req.mode, image_sizes=req.image_sizes, chrome=req.chrome)
+            #CALLERS CHECK THIS: A SERVER WITHOUT THE FONT (OR WITHOUT lang SUPPORT) MUST NOT PASS AS TRANSLATED//
+            result["font"] = font_name()
+            return result
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -65,7 +81,7 @@ def layout(req: LayoutRequest, authorization: Optional[str] = Header(default=Non
 @app.post("/api/pdf/render")
 def render(req: RenderRequest, authorization: Optional[str] = Header(default=None)):
     _check_auth(authorization)
-    pdf = render_pdf(req.document)
+    pdf = _render_for(req)
     return Response(
         content=pdf,
         media_type="application/pdf",
@@ -85,7 +101,7 @@ def raster(req: RasterRequest, authorization: Optional[str] = Header(default=Non
     fmt=json      -> {png_base64, page, page_count}  (handy for the agent)
     """
     _check_auth(authorization)
-    pdf = render_pdf(req.document)
+    pdf = _render_for(req)
     total = page_count(pdf)
     if fmt == "json" and req.all_pages:
         pages = [base64.b64encode(png).decode("ascii") for png in render_all_pages_png(pdf, scale=req.scale)]

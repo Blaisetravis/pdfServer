@@ -194,10 +194,16 @@ class Document(BaseModel):
 
 class RenderRequest(BaseModel):
     document: Document
+    # Translated documents (share links): picks the bundled font for scripts Helvetica
+    # lacks, e.g. "zh-Hans". None, or any language Helvetica covers, keeps Helvetica.
+    lang: Optional[str] = Field(default=None, max_length=16)
 
 
 class RasterRequest(BaseModel):
     document: Document
+    # Translated documents (share links): picks the bundled font for scripts Helvetica
+    # lacks, e.g. "zh-Hans". None, or any language Helvetica covers, keeps Helvetica.
+    lang: Optional[str] = Field(default=None, max_length=16)
     page: int = 1                   # 1-based page number to rasterize
     scale: float = 2.0              # render scale for the PNG
     all_pages: bool = False         # fmt=json only: also return every page in one response
@@ -210,3 +216,6 @@ class LayoutRequest(BaseModel):
     mode: Literal["pages", "sheet"] = "pages"
     chrome: bool = True                                   # pages mode: border, top bar, footer
     image_sizes: dict[str, tuple[float, float]] = Field(default_factory=dict)   # src -> (width, height)
+    # Translated documents (share links): picks the bundled font for scripts Helvetica
+    # lacks, e.g. "zh-Hans". None, or any language Helvetica covers, keeps Helvetica.
+    lang: Optional[str] = Field(default=None, max_length=16)
